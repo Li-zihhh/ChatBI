@@ -1,13 +1,3 @@
-"""
-第5课实战版本0：Zero-shot 基础版
-
-仅提供角色定义和用户问题，不注入任何 Schema 信息。
-展示无 Schema 信息时 LLM 生成 SQL 的准确性边界。
-
-运行方式：
-    uv run python text2sql_v0.py
-"""
-
 import os
 from dotenv import load_dotenv
 
@@ -15,7 +5,7 @@ load_dotenv()
 from config import llm as OPENAI_LLM
 import re
 
-# ==================== 手写 Schema（完全靠人工整理）====================
+# ==================== Schema ====================
 SCHEMA = """
 表：dim_customers（客户维度表）
 - customer_id INT 主键
