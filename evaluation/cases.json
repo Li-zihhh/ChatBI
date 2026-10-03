@@ -1,0 +1,150 @@
+{
+  "name": "ChatBI Text2SQL 评估用例集",
+  "description": "覆盖单表过滤、多表 JOIN、聚合、时间计算、汇率折算、费用层级、毛利等业务规则的黄金 SQL 用例。",
+  "cases": [
+    {
+      "id": "c01",
+      "question": "查询已完成订单的总数量",
+      "golden_sql": "SELECT COUNT(*) AS order_count FROM sales_orders WHERE order_status = 'completed';",
+      "difficulty": "easy",
+      "category": "single_table",
+      "tags": ["count", "filter"],
+      "rules": ["订单统计必须过滤 completed"]
+    },
+    {
+      "id": "c02",
+      "question": "查询德国客户数量",
+      "golden_sql": "SELECT COUNT(*) AS customer_count FROM dim_customers WHERE country = 'Germany';",
+      "difficulty": "easy",
+      "category": "single_table",
+      "tags": ["count", "filter"],
+      "rules": ["维度表直接过滤"]
+    },
+    {
+      "id": "c03",
+      "question": "按客户类型统计已完成订单数量",
+      "golden_sql": "SELECT c.customer_type, COUNT(*) AS order_count FROM sales_orders o JOIN dim_customers c ON o.customer_id = c.customer_id WHERE o.order_status = 'completed' GROUP BY c.customer_type;",
+      "difficulty": "medium",
+      "category": "join",
+      "tags": ["join", "group_by", "filter"],
+      "rules": ["JOIN 维度表", "订单统计必须过滤 completed"]
+    },
+    {
+      "id": "c04",
+      "question": "按产品线统计不含税收入",
+      "golden_sql": "SELECT p.product_line, SUM(o.net_amount) AS revenue FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' GROUP BY p.product_line;",
+      "difficulty": "medium",
+      "category": "aggregation",
+      "tags": ["join", "group_by", "net_amount"],
+      "rules": ["收入口径使用 net_amount", "订单统计必须过滤 completed"]
+    },
+    {
+      "id": "c05",
+      "question": "查询2026年第一季度的总费用",
+      "golden_sql": "SELECT SUM(rd_expense + selling_expense + admin_expense + finance_expense) AS total_expense FROM finance_expenses WHERE expense_date >= '2026-01-01' AND expense_date < '2026-04-01';",
+      "difficulty": "medium",
+      "category": "finance",
+      "tags": ["sum", "time", "expense_hierarchy"],
+      "rules": ["费用汇总不得重复计算子项", "时间闭开区间"]
+    },
+    {
+      "id": "c06",
+      "question": "欧洲市场最近三个月的销售额（人民币）",
+      "golden_sql": "SELECT SUM(o.net_amount * e.rate_to_cny) AS revenue FROM sales_orders o JOIN exchange_rates e ON o.order_date = e.rate_date AND o.currency = e.currency WHERE o.region = '欧洲' AND o.order_status = 'completed' AND o.order_date >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH);",
+      "difficulty": "hard",
+      "category": "exchange_rate",
+      "tags": ["join", "currency", "recent_months"],
+      "rules": ["多币种收入按汇率折算人民币", "收入口径 net_amount", "最近N个月用 DATE_SUB"]
+    },
+    {
+      "id": "c07",
+      "question": "本月各部门的研发费用",
+      "golden_sql": "SELECT department, SUM(rd_expense) AS rd_total FROM finance_expenses WHERE expense_date >= DATE_FORMAT(CURDATE(), '%Y-%m-01') AND expense_date <= CURDATE() GROUP BY department;",
+      "difficulty": "hard",
+      "category": "time",
+      "tags": ["group_by", "month_start"],
+      "rules": ["本月指当月1日至当前日期"]
+    },
+    {
+      "id": "c08",
+      "question": "各产品线的毛利率",
+      "golden_sql": "SELECT p.product_line, (SUM(o.net_amount) - SUM((p.material_cost + p.labor_cost) * o.quantity)) / SUM(o.net_amount) AS gross_margin FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' GROUP BY p.product_line;",
+      "difficulty": "hard",
+      "category": "gross_margin",
+      "tags": ["join", "group_by", "gross_margin"],
+      "rules": ["毛利 = net_amount - (material_cost + labor_cost) * quantity"]
+    },
+    {
+      "id": "c09",
+      "question": "查询所有已取消的订单编号",
+      "golden_sql": "SELECT order_no FROM sales_orders WHERE order_status = 'cancelled';",
+      "difficulty": "easy",
+      "category": "single_table",
+      "tags": ["filter", "cancelled"],
+      "rules": ["按订单状态过滤"]
+    },
+    {
+      "id": "c10",
+      "question": "统计各销售区域的订单金额（人民币）",
+      "golden_sql": "SELECT o.region, SUM(o.net_amount * e.rate_to_cny) AS revenue FROM sales_orders o JOIN exchange_rates e ON o.order_date = e.rate_date AND o.currency = e.currency WHERE o.order_status = 'completed' GROUP BY o.region;",
+      "difficulty": "hard",
+      "category": "exchange_rate",
+      "tags": ["join", "currency", "group_by"],
+      "rules": ["多币种收入按汇率折算人民币", "收入口径 net_amount"]
+    },
+    {
+      "id": "c11",
+      "question": "查询储能集成商客户的数量",
+      "golden_sql": "SELECT COUNT(*) AS customer_count FROM dim_customers WHERE customer_type = '储能集成商';",
+      "difficulty": "easy",
+      "category": "single_table",
+      "tags": ["count", "filter"],
+      "rules": ["维度表直接过滤"]
+    },
+    {
+      "id": "c12",
+      "question": "查询换电运营商客户所在的国家",
+      "golden_sql": "SELECT DISTINCT country FROM dim_customers WHERE customer_type = '换电运营商';",
+      "difficulty": "easy",
+      "category": "single_table",
+      "tags": ["distinct", "filter"],
+      "rules": ["维度表去重查询"]
+    },
+    {
+      "id": "c13",
+      "question": "统计各技术路线产品的平均标准成本",
+      "golden_sql": "SELECT tech_route, AVG(standard_cost) AS avg_standard_cost FROM dim_products GROUP BY tech_route;",
+      "difficulty": "easy",
+      "category": "aggregation",
+      "tags": ["avg", "group_by"],
+      "rules": ["明确问标准成本时才用 standard_cost"]
+    },
+    {
+      "id": "c14",
+      "question": "查询销售费用最高的三个部门",
+      "golden_sql": "SELECT department, SUM(selling_expense) AS total_selling FROM finance_expenses GROUP BY department ORDER BY total_selling DESC LIMIT 3;",
+      "difficulty": "medium",
+      "category": "finance",
+      "tags": ["order_by", "limit", "expense_hierarchy"],
+      "rules": ["selling_expense 是销售费用总项"]
+    },
+    {
+      "id": "c15",
+      "question": "查询2026年6月所有已完成订单的毛利",
+      "golden_sql": "SELECT SUM(o.net_amount - (p.material_cost + p.labor_cost) * o.quantity) AS gross_profit FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' AND o.order_date >= '2026-06-01' AND o.order_date < '2026-07-01';",
+      "difficulty": "hard",
+      "category": "gross_margin",
+      "tags": ["join", "time", "gross_margin"],
+      "rules": ["毛利公式", "时间闭开区间", "订单统计必须过滤 completed"]
+    },
+    {
+      "id": "c16",
+      "question": "查询含税销售额最高的产品名称",
+      "golden_sql": "SELECT p.product_name, SUM(o.gross_amount) AS gross_revenue FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' GROUP BY p.product_name ORDER BY gross_revenue DESC LIMIT 1;",
+      "difficulty": "hard",
+      "category": "aggregation",
+      "tags": ["join", "gross_amount", "order_by", "limit"],
+      "rules": ["明确问含税时才用 gross_amount"]
+    }
+  ]
+}
