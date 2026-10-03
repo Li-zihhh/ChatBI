@@ -20,8 +20,8 @@ class LLMError(Exception):
 class LLMClient:
     """LLM 客户端"""
 
-    def __init__(self):
-        self.config = LLM_CONFIG
+    def __init__(self, config: dict = None):
+        self.config = config if config is not None else LLM_CONFIG
 
         api_key = self.config.get("api_key")
         base_url = self.config.get("base_url")

@@ -1,0 +1,336 @@
+{
+  "cases": [
+    {
+      "id": "c01",
+      "question": "查询已完成订单的总数量",
+      "golden_sql": "SELECT COUNT(*) AS order_count FROM sales_orders WHERE order_status = 'completed';",
+      "generated_sql": "SELECT COUNT(*) \nFROM sales_orders \nWHERE order_status = 'completed';",
+      "metrics": {
+        "exact_match": false,
+        "select_match": true,
+        "select_jaccard": 1.0,
+        "table_match": true,
+        "condition_recall": 1.0,
+        "condition_match": true,
+        "group_match": true,
+        "order_match": true,
+        "limit_match": true,
+        "structure_score": 1.0,
+        "execution_match": true
+      },
+      "passed": true
+    },
+    {
+      "id": "c02",
+      "question": "查询德国客户数量",
+      "golden_sql": "SELECT COUNT(*) AS customer_count FROM dim_customers WHERE country = 'Germany';",
+      "generated_sql": "SELECT COUNT(*) AS customer_count\nFROM dim_customers\nWHERE country = 'Germany';",
+      "metrics": {
+        "exact_match": true,
+        "select_match": true,
+        "select_jaccard": 1.0,
+        "table_match": true,
+        "condition_recall": 1.0,
+        "condition_match": true,
+        "group_match": true,
+        "order_match": true,
+        "limit_match": true,
+        "structure_score": 1.0,
+        "execution_match": true
+      },
+      "passed": true
+    },
+    {
+      "id": "c03",
+      "question": "按客户类型统计已完成订单数量",
+      "golden_sql": "SELECT c.customer_type, COUNT(*) AS order_count FROM sales_orders o JOIN dim_customers c ON o.customer_id = c.customer_id WHERE o.order_status = 'completed' GROUP BY c.customer_type;",
+      "generated_sql": "SELECT c.customer_type, COUNT(*) AS order_count\nFROM sales_orders o\nJOIN dim_customers c ON o.customer_id = c.customer_id\nWHERE o.order_status = 'completed'\nGROUP BY c.customer_type;",
+      "metrics": {
+        "exact_match": true,
+        "select_match": true,
+        "select_jaccard": 1.0,
+        "table_match": true,
+        "condition_recall": 1.0,
+        "condition_match": true,
+        "group_match": true,
+        "order_match": true,
+        "limit_match": true,
+        "structure_score": 1.0,
+        "execution_match": true
+      },
+      "passed": true
+    },
+    {
+      "id": "c04",
+      "question": "按产品线统计不含税收入",
+      "golden_sql": "SELECT p.product_line, SUM(o.net_amount) AS revenue FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' GROUP BY p.product_line;",
+      "generated_sql": "SELECT p.product_line, SUM(o.net_amount) AS net_revenue\nFROM sales_orders o\nJOIN dim_products p ON o.product_id = p.product_id\nWHERE o.order_status = 'completed'\nGROUP BY p.product_line\nORDER BY p.product_line;",
+      "metrics": {
+        "exact_match": false,
+        "select_match": true,
+        "select_jaccard": 1.0,
+        "table_match": true,
+        "condition_recall": 1.0,
+        "condition_match": true,
+        "group_match": false,
+        "order_match": false,
+        "limit_match": true,
+        "structure_score": 0.85,
+        "execution_match": true
+      },
+      "passed": true
+    },
+    {
+      "id": "c05",
+      "question": "查询2026年第一季度的总费用",
+      "golden_sql": "SELECT SUM(rd_expense + selling_expense + admin_expense + finance_expense) AS total_expense FROM finance_expenses WHERE expense_date >= '2026-01-01' AND expense_date < '2026-04-01';",
+      "generated_sql": "SELECT SUM(rd_expense + selling_expense + admin_expense + finance_expense) AS total_expense\nFROM finance_expenses\nWHERE expense_date >= '2026-01-01' AND expense_date < '2026-04-01';",
+      "metrics": {
+        "exact_match": true,
+        "select_match": true,
+        "select_jaccard": 1.0,
+        "table_match": true,
+        "condition_recall": 1.0,
+        "condition_match": true,
+        "group_match": true,
+        "order_match": true,
+        "limit_match": true,
+        "structure_score": 1.0,
+        "execution_match": true
+      },
+      "passed": true
+    },
+    {
+      "id": "c06",
+      "question": "欧洲市场最近三个月的销售额（人民币）",
+      "golden_sql": "SELECT SUM(o.net_amount * e.rate_to_cny) AS revenue FROM sales_orders o JOIN exchange_rates e ON o.order_date = e.rate_date AND o.currency = e.currency WHERE o.region = '欧洲' AND o.order_status = 'completed' AND o.order_date >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH);",
+      "generated_sql": "SELECT SUM(o.net_amount * e.rate_to_cny) AS revenue\nFROM sales_orders o\nJOIN exchange_rates e ON o.order_date = e.rate_date AND o.currency = e.currency\nWHERE o.region = '欧洲'\n  AND o.order_status = 'completed'\n  AND o.order_date >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH);",
+      "metrics": {
+        "exact_match": true,
+        "select_match": true,
+        "select_jaccard": 1.0,
+        "table_match": true,
+        "condition_recall": 1.0,
+        "condition_match": true,
+        "group_match": true,
+        "order_match": true,
+        "limit_match": true,
+        "structure_score": 1.0,
+        "execution_match": true
+      },
+      "passed": true
+    },
+    {
+      "id": "c07",
+      "question": "本月各部门的研发费用",
+      "golden_sql": "SELECT department, SUM(rd_expense) AS rd_total FROM finance_expenses WHERE expense_date >= DATE_FORMAT(CURDATE(), '%Y-%m-01') AND expense_date <= CURDATE() GROUP BY department;",
+      "generated_sql": "SELECT \n    department, \n    SUM(rd_expense) AS total_rd_expense\nFROM \n    finance_expenses\nWHERE \n    expense_date >= DATE_FORMAT(CURDATE(), '%Y-%m-01') \n    AND expense_date <= CURDATE()\nGROUP BY \n    department\nORDER BY \n    total_rd_expense DESC;",
+      "metrics": {
+        "exact_match": false,
+        "select_match": true,
+        "select_jaccard": 1.0,
+        "table_match": true,
+        "condition_recall": 1.0,
+        "condition_match": true,
+        "group_match": false,
+        "order_match": false,
+        "limit_match": true,
+        "structure_score": 0.85,
+        "execution_match": true
+      },
+      "passed": true
+    },
+    {
+      "id": "c08",
+      "question": "各产品线的毛利率",
+      "golden_sql": "SELECT p.product_line, (SUM(o.net_amount) - SUM((p.material_cost + p.labor_cost) * o.quantity)) / SUM(o.net_amount) AS gross_margin FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' GROUP BY p.product_line;",
+      "generated_sql": "SELECT \n    p.product_line,\n    (SUM(o.net_amount) - SUM((p.material_cost + p.labor_cost) * o.quantity)) / SUM(o.net_amount) AS gross_margin\nFROM \n    sales_orders o\nJOIN \n    dim_products p ON o.product_id = p.product_id\nWHERE \n    o.order_status = 'completed'\nGROUP BY \n    p.product_line\nORDER BY \n    gross_margin DESC;",
+      "metrics": {
+        "exact_match": false,
+        "select_match": true,
+        "select_jaccard": 1.0,
+        "table_match": true,
+        "condition_recall": 1.0,
+        "condition_match": true,
+        "group_match": false,
+        "order_match": false,
+        "limit_match": true,
+        "structure_score": 0.85,
+        "execution_match": true
+      },
+      "passed": true
+    },
+    {
+      "id": "c09",
+      "question": "查询所有已取消的订单编号",
+      "golden_sql": "SELECT order_no FROM sales_orders WHERE order_status = 'cancelled';",
+      "generated_sql": "SELECT order_no \nFROM sales_orders \nWHERE order_status = 'cancelled';",
+      "metrics": {
+        "exact_match": true,
+        "select_match": true,
+        "select_jaccard": 1.0,
+        "table_match": true,
+        "condition_recall": 1.0,
+        "condition_match": true,
+        "group_match": true,
+        "order_match": true,
+        "limit_match": true,
+        "structure_score": 1.0,
+        "execution_match": true
+      },
+      "passed": true
+    },
+    {
+      "id": "c10",
+      "question": "统计各销售区域的订单金额（人民币）",
+      "golden_sql": "SELECT o.region, SUM(o.net_amount * e.rate_to_cny) AS revenue FROM sales_orders o JOIN exchange_rates e ON o.order_date = e.rate_date AND o.currency = e.currency WHERE o.order_status = 'completed' GROUP BY o.region;",
+      "generated_sql": "SELECT o.region, SUM(o.net_amount * e.rate_to_cny) AS revenue\nFROM sales_orders o\nJOIN exchange_rates e ON o.order_date = e.rate_date AND o.currency = e.currency\nWHERE o.order_status = 'completed'\nGROUP BY o.region;",
+      "metrics": {
+        "exact_match": true,
+        "select_match": true,
+        "select_jaccard": 1.0,
+        "table_match": true,
+        "condition_recall": 1.0,
+        "condition_match": true,
+        "group_match": true,
+        "order_match": true,
+        "limit_match": true,
+        "structure_score": 1.0,
+        "execution_match": true
+      },
+      "passed": true
+    },
+    {
+      "id": "c11",
+      "question": "查询储能集成商客户的数量",
+      "golden_sql": "SELECT COUNT(*) AS customer_count FROM dim_customers WHERE customer_type = '储能集成商';",
+      "generated_sql": "SELECT COUNT(*) AS customer_count\nFROM dim_customers\nWHERE customer_type = '储能集成商';",
+      "metrics": {
+        "exact_match": true,
+        "select_match": true,
+        "select_jaccard": 1.0,
+        "table_match": true,
+        "condition_recall": 1.0,
+        "condition_match": true,
+        "group_match": true,
+        "order_match": true,
+        "limit_match": true,
+        "structure_score": 1.0,
+        "execution_match": true
+      },
+      "passed": true
+    },
+    {
+      "id": "c12",
+      "question": "查询换电运营商客户所在的国家",
+      "golden_sql": "SELECT DISTINCT country FROM dim_customers WHERE customer_type = '换电运营商';",
+      "generated_sql": "SELECT c.country\nFROM dim_customers c\nWHERE c.customer_type = '换电运营商';",
+      "metrics": {
+        "exact_match": false,
+        "select_match": false,
+        "select_jaccard": 0.0,
+        "table_match": true,
+        "condition_recall": 1.0,
+        "condition_match": true,
+        "group_match": true,
+        "order_match": true,
+        "limit_match": true,
+        "structure_score": 0.7,
+        "execution_match": true
+      },
+      "passed": true
+    },
+    {
+      "id": "c13",
+      "question": "统计各技术路线产品的平均标准成本",
+      "golden_sql": "SELECT tech_route, AVG(standard_cost) AS avg_standard_cost FROM dim_products GROUP BY tech_route;",
+      "generated_sql": "SELECT p.tech_route, AVG(p.standard_cost) AS average_standard_cost\nFROM dim_products p\nGROUP BY p.tech_route\nORDER BY p.tech_route;",
+      "metrics": {
+        "exact_match": false,
+        "select_match": true,
+        "select_jaccard": 1.0,
+        "table_match": true,
+        "condition_recall": 1.0,
+        "condition_match": true,
+        "group_match": false,
+        "order_match": false,
+        "limit_match": true,
+        "structure_score": 0.85,
+        "execution_match": true
+      },
+      "passed": true
+    },
+    {
+      "id": "c14",
+      "question": "查询销售费用最高的三个部门",
+      "golden_sql": "SELECT department, SUM(selling_expense) AS total_selling FROM finance_expenses GROUP BY department ORDER BY total_selling DESC LIMIT 3;",
+      "generated_sql": "SELECT department, SUM(selling_expense) AS total_selling\nFROM finance_expenses\nGROUP BY department\nORDER BY total_selling DESC\nLIMIT 3;",
+      "metrics": {
+        "exact_match": true,
+        "select_match": true,
+        "select_jaccard": 1.0,
+        "table_match": true,
+        "condition_recall": 1.0,
+        "condition_match": true,
+        "group_match": true,
+        "order_match": true,
+        "limit_match": true,
+        "structure_score": 1.0,
+        "execution_match": true
+      },
+      "passed": true
+    },
+    {
+      "id": "c15",
+      "question": "查询2026年6月所有已完成订单的毛利",
+      "golden_sql": "SELECT SUM(o.net_amount - (p.material_cost + p.labor_cost) * o.quantity) AS gross_profit FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' AND o.order_date >= '2026-06-01' AND o.order_date < '2026-07-01';",
+      "generated_sql": "SELECT \n    SUM(o.net_amount - (p.material_cost + p.labor_cost) * o.quantity) AS gross_profit\nFROM \n    sales_orders o\nJOIN \n    dim_products p ON o.product_id = p.product_id\nWHERE \n    o.order_status = 'completed'\n    AND o.order_date >= '2026-06-01'\n    AND o.order_date < '2026-07-01';",
+      "metrics": {
+        "exact_match": true,
+        "select_match": true,
+        "select_jaccard": 1.0,
+        "table_match": true,
+        "condition_recall": 1.0,
+        "condition_match": true,
+        "group_match": true,
+        "order_match": true,
+        "limit_match": true,
+        "structure_score": 1.0,
+        "execution_match": true
+      },
+      "passed": true
+    },
+    {
+      "id": "c16",
+      "question": "查询含税销售额最高的产品名称",
+      "golden_sql": "SELECT p.product_name, SUM(o.gross_amount) AS gross_revenue FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' GROUP BY p.product_name ORDER BY gross_revenue DESC LIMIT 1;",
+      "generated_sql": "SELECT p.product_name, SUM(o.gross_amount) AS gross_revenue\nFROM sales_orders o\nJOIN dim_products p ON o.product_id = p.product_id\nWHERE o.order_status = 'completed'\nGROUP BY p.product_name\nORDER BY gross_revenue DESC\nLIMIT 1;",
+      "metrics": {
+        "exact_match": true,
+        "select_match": true,
+        "select_jaccard": 1.0,
+        "table_match": true,
+        "condition_recall": 1.0,
+        "condition_match": true,
+        "group_match": true,
+        "order_match": true,
+        "limit_match": true,
+        "structure_score": 1.0,
+        "execution_match": true
+      },
+      "passed": true
+    }
+  ],
+  "summary": {
+    "total": 16,
+    "passed": 16,
+    "pass_rate": 1.0,
+    "exact_match": 10,
+    "exact_match_rate": 0.625,
+    "avg_structure_score": 0.9437,
+    "execution_accuracy": 1.0,
+    "avg_select_jaccard": 0.9375,
+    "avg_condition_recall": 1.0,
+    "error_distribution": {}
+  }
+}
