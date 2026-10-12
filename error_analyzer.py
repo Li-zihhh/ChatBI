@@ -183,57 +183,52 @@ class ErrorAnalyzer:
         return detected
 
     def _check_field_error(self, sql: str, question: Optional[str]) -> bool:
-        """检测字段选择错误"""
-        # 问题问收入但 SQL 用了 gross_amount
+        """检测字段选择错误: 业务口径混淆 (net vs gross, actual vs standard)。"""
+        # 问收入/销售额 → 应该用 net_amount,不该单独出现 gross_amount
         if question and ("收入" in question or "销售额" in question):
             if "gross_amount" in sql and "net_amount" not in sql:
                 return True
-        # 问题问成本但 SQL 用了 standard_cost
+        # 问成本 → 应该用实际成本 (material_cost),不该用标准成本
         if question and "成本" in question:
             if "standard_cost" in sql and "material_cost" not in sql:
                 return True
         return False
 
     def _check_join_error(self, sql: str, question: Optional[str]) -> bool:
-        """检测 Join 关联错误"""
-        # 涉及收入/销售额但未关联汇率表
+        """检测 Join 关联遗漏: 该关联汇率/维度表时没有关联。"""
+        # 涉及多币种 → 应该关联 exchange_rates
         if question and ("收入" in question or "销售额" in question):
             if "exchange_rates" not in sql and "currency" in sql:
                 return True
-        # 涉及客户/产品维度但未关联对应维度表
+        # 涉及客户/产品维度 → 应该关联维度表
         if question and ("客户" in question or "产品线" in question):
             if "dim_customers" not in sql and "dim_products" not in sql:
                 return True
         return False
 
     def _check_time_error(self, sql: str, question: Optional[str]) -> bool:
-        """检测时间计算错误"""
+        """检测动态时间边界处理: 问了"最近/本月"却没用日期函数。"""
         if question and ("最近" in question or "上个" in question or "本月" in question):
-            # 未使用日期函数处理动态时间
             if "DATE_SUB" not in sql and "CURDATE" not in sql:
                 return True
         return False
 
     def _check_filter_error(self, sql: str, question: Optional[str]) -> bool:
-        """检测过滤条件遗漏"""
-        # 统计订单但未过滤状态
+        """检测过滤条件遗漏: 订单类查询必须带 order_status。"""
         if question and ("订单" in question or "收入" in question or "销售额" in question):
             if "order_status" not in sql:
                 return True
         return False
 
     def _check_aggregation_error(self, sql: str, question: Optional[str]) -> bool:
-        """检测聚合逻辑错误"""
-        # 使用了聚合函数但没有 GROUP BY
+        """检测聚合逻辑错误: 有聚合函数 + SELECT 有非聚合字段,却没有 GROUP BY。"""
         has_agg = bool(re.search(r'sum\(|avg\(|count\(|max\(|min\(', sql))
         has_groupby = "group by" in sql
         if has_agg and not has_groupby:
-            # 检查 SELECT 中是否有非聚合字段（简单启发式）
             select_part = sql.split("from")[0] if "from" in sql else sql
             non_agg_fields = re.findall(r'select\s+(.*?)\s+from', sql, re.DOTALL)
             if non_agg_fields:
                 fields = non_agg_fields[0].split(",")
-                # 如果有多于一个字段且没有 GROUP BY，可能存在聚合错误
                 if len(fields) > 1:
                     return True
         return False

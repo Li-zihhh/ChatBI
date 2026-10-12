@@ -8,7 +8,7 @@ LLM 客户端模块
 import re
 
 from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_community.chat_models.openai import ChatOpenAI
+from langchain_openai import ChatOpenAI
 
 from config import LLM_CONFIG
 
@@ -43,6 +43,7 @@ class LLMClient:
             model=model,
             max_tokens=self.config.get("max_tokens", 4000),
             temperature=self.config.get("temperature", 0.2),
+            timeout=self.config.get("timeout", 30),
         )
 
     def generate_sql(self, system_prompt: str, prompt: str) -> str:
@@ -89,3 +90,8 @@ class LLMClient:
 
         sql = re.sub(r"```sql|```", "", raw_output).strip()
         return sql
+
+if __name__ == '__main__':
+    client = LLMClient(config=LLM_CONFIG)
+    sql = client.generate_sql("你是一个专业的 SQL 生成助手，擅长根据业务问题生成标准 MySQL 查询语句。", "查询所有订单")
+    print(sql)

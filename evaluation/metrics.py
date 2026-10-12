@@ -1,6 +1,9 @@
-"""SQL 对比指标。
+"""SQL 对比指标引擎。
 
-提供 SQL 归一化、组件解析、结构对比与结果集比较，用于 Text2SQL 评估。
+核心思路: 把 SQL 拆成可独立比较的组件（列、表、条件、GROUP BY、ORDER BY、LIMIT）,
+分别计算每个维度的匹配度,再加权汇总为一个 0~1 的结构得分。
+
+括号深度感知: 所有拆分函数都在 depth=0 时才切分,避免误拆子查询内部的逗号/AND。
 """
 
 from __future__ import annotations
@@ -8,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Tuple
 
-
+# SQL 子句关键字,顺序决定了 _clause_spans 的扫描顺序
 _CLAUSE_PATTERNS = [
     ("select", re.compile(r"\bselect\b", re.IGNORECASE)),
     ("from", re.compile(r"\bfrom\b", re.IGNORECASE)),
@@ -20,13 +23,13 @@ _CLAUSE_PATTERNS = [
     ("limit", re.compile(r"\blimit\b", re.IGNORECASE)),
 ]
 
-_BOOL_OP_RE = re.compile(r"\b(and|or)\b", re.IGNORECASE)
-_QUALIFIER_RE = re.compile(r"\b[a-z_][a-z0-9_]*\.")
+_BOOL_OP_RE = re.compile(r"\b(and|or)\b", re.IGNORECASE)     # AND / OR 边界
+_QUALIFIER_RE = re.compile(r"\b[a-z_][a-z0-9_]*\.")          # 表别名前缀,如 o. / e.
 _SPACE_RE = re.compile(r"\s+")
 
 
 def normalize_sql(sql: str) -> str:
-    """归一化 SQL：去首尾空白、去分号、合并空白、转小写。"""
+    """归一化 SQL: 去首尾空白、去分号、合并空白、转小写。用于精确匹配判定。"""
     if sql is None:
         return ""
     s = sql.strip()
@@ -37,7 +40,10 @@ def normalize_sql(sql: str) -> str:
 
 
 def _clause_spans(sql: str) -> Dict[str, Tuple[int, int]]:
-    """定位各子句关键字在括号深度为 0 时的位置。"""
+    """定位各子句关键字在括号深度为 0 时的 (start, end) 位置。
+
+    为什么要深度感知? 防止子查询里的 SELECT/FROM 被误识别为主子句。
+    """
     spans: Dict[str, Tuple[int, int]] = {}
     lower = sql.lower()
     depth = 0
@@ -75,7 +81,7 @@ def _extract_clause(sql: str, key: str) -> str:
 
 
 def _split_top_level(text: str, sep: str = ",") -> List[str]:
-    """在括号深度为 0 处按分隔符切分。"""
+    """在括号深度为 0 处按分隔符切分,用于 SELECT 列和 GROUP BY 字段的拆分。"""
     parts: List[str] = []
     depth = 0
     cur: List[str] = []
@@ -95,7 +101,11 @@ def _split_top_level(text: str, sep: str = ",") -> List[str]:
 
 
 def _split_conditions(text: str) -> List[str]:
-    """在括号深度为 0 处按 AND/OR 切分条件。"""
+    """在括号深度为 0 处按 AND/OR 切分 WHERE 条件。
+
+    注意: re.match 返回的 m.end() 已是绝对位置,直接赋值给 last 即可,
+    之前有版本误写成 last = i + m.end(),导致从第 2 个 AND 起全部条件畸变。
+    """
     parts: List[str] = []
     depth = 0
     last = 0
@@ -111,7 +121,7 @@ def _split_conditions(text: str) -> List[str]:
             m = _BOOL_OP_RE.match(text, i)
             if m:
                 parts.append(text[last:i].strip())
-                last = m.end()
+                last = m.end()        # ← 关键: m.end() 已经是绝对位置
                 i = last
                 continue
         i += 1
@@ -120,7 +130,7 @@ def _split_conditions(text: str) -> List[str]:
 
 
 def _normalize_expr(expr: str) -> str:
-    """归一化列/表达式：去限定符、去 AS 别名、压缩运算符两侧空格。"""
+    """归一化列/表达式: 去限定符 (o.)、去 AS 别名、压缩运算符空格。"""
     e = _SPACE_RE.sub(" ", expr.strip()).lower()
     e = _QUALIFIER_RE.sub("", e)
     e = re.sub(r"\s+as\s+[a-z_][a-z0-9_]*$", "", e)
@@ -131,7 +141,7 @@ def _normalize_expr(expr: str) -> str:
 
 
 def _normalize_condition(cond: str) -> str:
-    """归一化 WHERE 条件，保留日期中的短横线等字面量。"""
+    """归一化 WHERE 条件,与 _normalize_expr 类似但保留字面量完整性。"""
     c = _SPACE_RE.sub(" ", cond.strip()).lower()
     c = _QUALIFIER_RE.sub("", c)
     c = re.sub(r"\s*([=<>+*/])\s*", r"\1", c)
@@ -141,11 +151,13 @@ def _normalize_condition(cond: str) -> str:
 
 
 def _normalize_order(expr: str) -> str:
+    """归一化 ORDER BY 项,去掉尾部的 ASC/DESC (方向独立比较)。"""
     e = _normalize_expr(expr)
     return re.sub(r"\s+(asc|desc)$", "", e)
 
 
 def _first_table(text: str) -> str:
+    """从 FROM/JOIN 子句中提取第一个表名 (跳过 LEFT/INNER 等修饰词)。"""
     text = text.strip()
     m = re.match(r"^(?:left|right|inner|outer|cross|full)\s+", text, re.IGNORECASE)
     if m:
@@ -157,6 +169,7 @@ def _first_table(text: str) -> str:
 
 
 def _parse_tables(sql: str) -> List[str]:
+    """提取 SQL 中所有 FROM + JOIN 的表名,去重排序。"""
     tables: List[str] = []
     spans = _clause_spans(sql)
     if "from" in spans:
@@ -171,7 +184,7 @@ def _parse_tables(sql: str) -> List[str]:
 
 
 def parse_components(sql: str) -> Dict[str, object]:
-    """把一条 SQL 拆成可比较的组件。"""
+    """把一条 SQL 拆成可比较的组件字典。"""
     comp: Dict[str, object] = {
         "columns": [],
         "tables": [],
@@ -213,10 +226,12 @@ def parse_components(sql: str) -> Dict[str, object]:
 
 
 def _token_set(text: str) -> set:
+    """从文本中提取 token 集合 (字母数字下划线),用于 Jaccard 相似度计算。"""
     return set(re.findall(r"[a-z0-9_]+", text))
 
 
 def _jaccard(a: set, b: set) -> float:
+    """Jaccard 相似度 = |A∩B| / |A∪B|。两空集视为完全相同。"""
     if not a and not b:
         return 1.0
     if not a or not b:
@@ -225,6 +240,11 @@ def _jaccard(a: set, b: set) -> float:
 
 
 def _condition_recall(gold_conds: List[str], gen_conds: List[str]) -> float:
+    """条件召回率: 黄金条件中有多少被生成条件覆盖。
+
+    匹配策略: 对每条黄金条件,在尚未被使用过的生成条件中找 Jaccard ≥ 0.7 的匹配。
+    使用贪心 + 不重复匹配,确保一条生成条件不会被多条黄金条件复用。
+    """
     if not gold_conds:
         return 1.0
     matched = 0
@@ -242,7 +262,16 @@ def _condition_recall(gold_conds: List[str], gen_conds: List[str]) -> float:
 
 
 def compare(golden_sql: str, generated_sql: str) -> Dict[str, object]:
-    """对比黄金 SQL 与生成 SQL，返回结构指标。"""
+    """对比黄金 SQL 与生成 SQL,返回完整结构指标。
+
+    structure_score 加权公式 (权重反映各维度的重要性):
+      0.30 × select_jaccard    ← 列/表达式正确最关键
+      0.25 × table_match       ← 表漏了 JOIN 一定不对
+      0.25 × condition_recall  ← 过滤条件漏了统计范围就错了
+      0.08 × group_match
+      0.07 × order_match
+      0.05 × limit_match
+    """
     exact = normalize_sql(golden_sql) == normalize_sql(generated_sql)
 
     g = parse_components(golden_sql)
@@ -281,7 +310,7 @@ def compare(golden_sql: str, generated_sql: str) -> Dict[str, object]:
 
 
 def rows_equal(rows_a: list, rows_b: list) -> bool:
-    """比较两个结果集是否等价（忽略行顺序）。"""
+    """比较两个结果集是否等价 (忽略行顺序)。"""
     a = sorted([repr(r) for r in (rows_a or [])])
     b = sorted([repr(r) for r in (rows_b or [])])
     return a == b
