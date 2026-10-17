@@ -5,12 +5,23 @@
 将数据库操作封装为独立模块,便于后续扩展(如连接池、读写分离等)。
 """
 
-from typing import Tuple, List
+from typing import Tuple, List, Any
 
 import pymysql
 
 from config import DB_CONFIG
+class QueryExecutionError(RuntimeError):
+    """数据库执行失败后的统一异常。"""
 
+    def __init__(
+        self,
+        error_type: str,
+        message: str,
+        metadata: dict[str, Any] | None = None,
+    ):
+        super().__init__(message)
+        self.error_type = error_type
+        self.metadata = metadata or {}
 
 class DatabaseClient:
     """MySQL 数据库客户端"""

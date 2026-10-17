@@ -56,7 +56,8 @@ class ChatBISystem:
             use_few_shot=use_few_shot,
             use_rules=use_rules,
             use_guards=use_guards,
-            indicator_knowledge=indicator_block
+            indicator_knowledge=indicator_block,
+            use_schema_linking=use_schema_linking,
         )
         # 3. 生成 SQL
         sql = self.llm.generate_sql(system_msg, prompt_msg)
@@ -117,7 +118,8 @@ class ChatBISystem:
             use_few_shot=use_few_shot,
             use_rules=use_rules,
             use_guards=use_guards,
-            indicator_knowledge=indicator_block
+            indicator_knowledge=indicator_block,
+            use_schema_linking=use_schema_linking,
         )
 
         # 3. 流式生成 SQL —— 逐 chunk 推送
@@ -192,8 +194,8 @@ def main():
             question = input("\n> ")
             if question.strip().lower() in ["exit", "quit", "q"]:
                 break
-            result = system.run(question)
-            _print_result(question, result)
+            for event in system.run_stream(question):
+                print(event)
 
         except (KeyboardInterrupt, EOFError):
             break

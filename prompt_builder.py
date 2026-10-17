@@ -138,17 +138,16 @@ ERROR_GUARDS = """
 - 字段合法性：不要输出 Schema 中不存在的字段；如果问题里出现未建模维度，优先回退到产品线、区域、客户、月份等已有维度
 """
 
-# ==================== 创建指标知识库 ====================
-from indicator_knowledge import IndicatorKnowledge
-_indicator_knowledge = IndicatorKnowledge()
+
 
 def build_prompt(
         user_question: str,
         use_few_shot: bool = True,
-        use_cot: bool = False,
+        use_cot: bool = True,
         use_rules: bool = False,
         use_guards: bool = False,
-        use_indicator: bool = False,
+        indicator_knowledge: str = "",
+        use_schema_linking: bool = False,
         ) -> tuple[str, str]:
     """构建提示词"""
 
@@ -156,8 +155,18 @@ def build_prompt(
     if use_rules or use_guards:
         system_msg = "你是一个专业的 SQL 生成助手，擅长根据业务问题生成标准 MySQL 查询语句。请严格遵守给定的业务规则，避免常见错误。"
 
+    # 动态 Schema Linking（失败时自动回退全量 Schema）
+    schema_text = SCHEMA
+    if use_schema_linking:
+        try:
+            from schema_linking.schema_linker import build_dynamic_prompt_schema
+            dynamic_schema = build_dynamic_prompt_schema(user_question)
+            if dynamic_schema:
+                schema_text = dynamic_schema
+        except Exception:
+            pass  # 回退到全量 SCHEMA
     prompt = f"""【数据库Schema】
-    {SCHEMA}
+    {schema_text}
     """
 
     if use_cot:
@@ -170,9 +179,9 @@ def build_prompt(
     {RULES}
     """
 
-    if use_indicator:
+    if indicator_knowledge:
         prompt += f"""
-    {_indicator_knowledge.build_knowledge_block(user_question)}
+    {indicator_knowledge}
     """
 
     if use_few_shot:
