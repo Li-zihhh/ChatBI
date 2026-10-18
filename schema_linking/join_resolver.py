@@ -5,7 +5,7 @@
 
 本模块包含两个独立职责：
 1. 锚表选择（select_anchor）：基于用户问题的意图，判断哪张表应该作为 SQL 的 FROM 子句主表。
-2. Join 路径推导（resolve_joins）：已知锚表后，使用 BFS 图算法找到连接所有目标表的最短路径。
+2. Join 路径推导（resolve_joins）：已知锚表后，使用一次 BFS 一次性算出到所有目标表的最短路径。
 
 不使用 Embedding，是纯图算法 + 轻量意图识别。
 """
@@ -118,33 +118,32 @@ def _score_tables_by_keywords(query: str, candidate_tables: list[str]) -> dict[s
     return scores
 
 
-def _bfs_shortest_path(start: str, end: str, relationships: dict) -> list[str] | None:
-    """BFS 寻找从 start 到 end 的最短路径"""
-    if start == end:
-        return [start]
+def _bfs_all_shortest_paths(start: str, relationships: dict) -> dict[str, list[str]]:
+    """从起点出发跑一次 BFS，返回起点到所有可达节点的最短路径。
 
-    queue = deque([(start, [start])])
-    visited = {start}
+    利用 BFS 首次访问即最短路径的性质，一次遍历算出到所有节点的最短路径，
+    避免逐对调用导致重复遍历同一子图。
+    """
+    paths = {start: [start]}
+    queue = deque([start])
 
     while queue:
-        current, path = queue.popleft()
+        current = queue.popleft()
         for edge in relationships.get(current, []):
-            next_table = edge["target"]
-            if next_table in visited:
+            neighbor = edge["target"]
+            if neighbor in paths:
                 continue
-            new_path = path + [next_table]
-            if next_table == end:
-                return new_path
-            visited.add(next_table)
-            queue.append((next_table, new_path))
+            paths[neighbor] = paths[current] + [neighbor]
+            queue.append(neighbor)
 
-    return None
+    return paths
 
 
 def _is_connected(anchor: str, target_tables: list[str], relationships: dict) -> bool:
-    """检查锚表是否能到达所有目标表"""
+    """检查锚表是否能到达所有目标表（一次 BFS，O(1) 查字典）"""
+    paths = _bfs_all_shortest_paths(anchor, relationships)
     for target in target_tables:
-        if target != anchor and _bfs_shortest_path(anchor, target, relationships) is None:
+        if target != anchor and target not in paths:
             return False
     return True
 
@@ -153,12 +152,15 @@ def _most_central_table(candidate_tables: list[str], relationships: dict) -> str
     """选择子图中到达其他节点总距离最小的表作为兜底锚表"""
     total_distances = {}
     for table in candidate_tables:
+        paths = _bfs_all_shortest_paths(table, relationships)
         total = 0
         for target in candidate_tables:
             if table == target:
                 continue
-            path = _bfs_shortest_path(table, target, relationships)
-            total += len(path) - 1 if path else 999
+            if target in paths:
+                total += len(paths[target]) - 1
+            else:
+                total += 999
         total_distances[table] = total
     return min(candidate_tables, key=lambda t: total_distances[t])
 
@@ -259,6 +261,8 @@ def resolve_joins(anchor_table: str, target_tables: list[str], relationships: di
     all_targets = set(target_tables)
     all_targets.add(anchor_table)
 
+    all_paths = _bfs_all_shortest_paths(anchor_table, relationships)
+
     visited_edges = set()
     joins = []
     unreachable = []
@@ -267,7 +271,7 @@ def resolve_joins(anchor_table: str, target_tables: list[str], relationships: di
         if target == anchor_table:
             continue
 
-        path = _bfs_shortest_path(anchor_table, target, relationships)
+        path = all_paths.get(target)
         if path is None:
             unreachable.append(target)
             continue
