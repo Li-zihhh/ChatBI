@@ -46,11 +46,15 @@ class ChatBISystem:
         if not self.parser.validate(parsed):
             return {"success": False, "error": "输入问题为空"}
 
-        # 2. 构造 Prompt
-        detected_indicators = []
-        indicator_block = ""
-        if use_indicator_knowledge:
-            detected_indicators, indicator_block = self.indicator_knowledge.get_indicator_context(user_question)
+        # 2. 指标知识注入（二选一：RAG 优先，关键词匹配兜底）
+        detected_indicators, indicator_block = self._resolve_indicator_context(
+            user_question=user_question,
+            use_indicator_knowledge=use_indicator_knowledge,
+            use_indicator_rag=use_indicator_rag,
+            indicator_knowledge=self.indicator_knowledge,
+            )
+
+        # 3. 构造 Prompt
         system_msg, prompt_msg = build_prompt(
             user_question,
             use_few_shot=use_few_shot,
@@ -59,10 +63,10 @@ class ChatBISystem:
             indicator_knowledge=indicator_block,
             use_schema_linking=use_schema_linking,
         )
-        # 3. 生成 SQL
+        # 4. 生成 SQL
         sql = self.llm.generate_sql(system_msg, prompt_msg)
 
-        # 4. 执行 SQL
+        # 5. 执行 SQL
         try:
             columns, results = self.db.execute(sql)
             formatted = self.formatter.format(columns, results)
@@ -76,7 +80,7 @@ class ChatBISystem:
             }
 
         except Exception as e:
-            # 5. sql 执行失败处理
+            # 6. sql 执行失败处理
             error_analyzer = ErrorAnalyzer(llm_client=self.analyzer_llm)
             error_result = error_analyzer.categorize_error(sql, str(e), user_question)
 
