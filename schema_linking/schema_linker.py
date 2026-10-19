@@ -10,11 +10,15 @@ Join 推理（join_resolver）三个模块串联为完整 Pipeline。
 替代原 prompt_builder.py 中的硬编码全量 Schema 注入方式。
 """
 
+import json
 from table_retriever import retrieve_tables, build_index
 from field_matcher import match_fields, build_field_index
 from join_resolver import (
     select_anchor,
     resolve_joins,
+    _is_connected,
+    _classify_intent,
+    TABLE_RELATIONSHIPS,
     STRONG_METRIC_WORDS,
     TABLE_TYPES,
     TABLE_KEYWORDS,
@@ -79,6 +83,179 @@ def _ensure_fact_table_for_metric(query: str, tables: list[dict]) -> list[dict]:
         tables = tables + [all_fact_tables[0]]
 
     return tables
+
+
+# ==================== 置信度评估（双通道核心） ====================
+CONFIDENCE_THRESHOLD = 0.7
+
+def assess_confidence(
+    query: str,
+    tables: list[dict],
+    anchor: str,
+    fields: list[dict],
+    join_path: dict,
+) -> float:
+    """
+    评估快速通道结果的置信度（严格遵循 docs/schema_linking_optimization.md 8.3 节设计）
+
+    Returns:
+        0.0 ~ 1.0，≥ CONFIDENCE_THRESHOLD 视为高置信度，可直接返回
+    """
+    score = 1.0
+
+    # 1. 表召回置信度（权重最高）
+    if not tables:
+        score -= 0.5
+    elif tables and tables[0].get("score", 0) < 0.5:
+        score -= 0.3
+
+    # 2. 意图分类置信度
+    intent = _classify_intent(query)
+    if intent == "ambiguous":
+        score -= 0.3
+
+    # 3. 锚表连通性（关键：连通性交叉校验）
+    candidate_names = [t["table_name"] for t in tables]
+    if anchor and candidate_names:
+        if not _is_connected(anchor, candidate_names, TABLE_RELATIONSHIPS):
+            score -= 0.3
+
+    # 4. 字段匹配置信度
+    if len(fields) < 3:
+        score -= 0.2
+
+    # 5. Join 可达性（关键：桥接表缺失检测）
+    if join_path.get("unreachable"):
+        unreachable_count = len(join_path["unreachable"])
+        score -= 0.15 * unreachable_count
+
+    # 6. 查询复杂度信号
+    table_count = len(tables)
+    if table_count > 3:
+        score -= 0.1
+
+    return max(score, 0.0)
+
+
+# ==================== LLM 慢速通道 ====================
+def schema_link_llm(query: str) -> dict:
+    """
+    LLM 慢速通道：用一次调用完成表选择 + 字段匹配 + Join 推理
+    （遵循 docs/schema_linking_optimization.md 8.4 节设计）
+    """
+    from llm_client import LLMClient
+    from config import LLM_CONFIG
+
+    llm = LLMClient(config=LLM_CONFIG)
+
+    prompt = f"""你是一个数据库 Schema 分析专家。已知以下数据库表结构：
+
+表名: sales_orders（事实表-销售订单）
+字段: order_id, order_no, customer_id, product_id, order_date, order_status,
+      quantity, unit_price, discount_amount, gross_amount, net_amount, currency, region
+
+表名: dim_customers（维度表-客户）
+字段: customer_id, customer_name, customer_type, industry, country, region
+
+表名: dim_products（维度表-产品）
+字段: product_id, product_name, product_line, category, tech_route,
+      standard_cost, material_cost, labor_cost
+
+表名: exchange_rates（参考表-汇率）
+字段: rate_date, currency, rate_to_cny
+
+表名: finance_expenses（事实表-费用）
+字段: expense_id, expense_date, department, rd_expense, selling_expense,
+      admin_expense, finance_expense
+
+表间关系：
+- sales_orders.customer_id ↔ dim_customers.customer_id (JOIN)
+- sales_orders.product_id ↔ dim_products.product_id (JOIN)
+- sales_orders.(order_date, currency) ↔ exchange_rates.(rate_date, currency) (LEFT JOIN)
+- finance_expenses 与其他表无直接关联，需独立查询
+
+用户问题：{query}
+
+请返回 JSON（不要输出其他内容）：
+{{
+    "anchor": "主表名",
+    "tables": ["需要使用的表"],
+    "fields": ["需要查询的字段（含表名前缀，如 o.net_amount）"],
+    "joins": [
+        {{"from": "表A", "to": "表B", "type": "JOIN/LEFT JOIN", "on": "条件"}}
+    ],
+    "reasoning": "选择理由（一句话）"
+}}"""
+
+    try:
+        system_msg = "你是一个专业的数据库 Schema 分析专家，只输出 JSON 格式结果。"
+        response_text = llm.generate_sql(system_msg, prompt)
+
+        json_str = response_text.strip()
+        if json_str.startswith('```'):
+            json_str = json_str.split('\n', 1)[1].rsplit('```', 1)[0].strip()
+
+        result = json.loads(json_str)
+
+        tables_from_llm = [
+            {"table_name": t, "score": 1.0, "description": f"LLM 选择: {t}", 
+             "domain": TABLE_TYPES.get(t, "unknown"), "key_fields": ""}
+            for t in result.get("tables", [])
+        ]
+
+        fields_from_llm = []
+        for f in result.get("fields", []):
+            parts = f.split('.')
+            table = parts[0] if len(parts) > 1 else ""
+            field = parts[-1] if parts else f
+            fields_from_llm.append({
+                "field_key": f,
+                "table": table,
+                "field": field,
+                "score": 1.0,
+                "description": "LLM 选择",
+            })
+
+        join_path_from_llm = {
+            "anchor": result.get("anchor", ""),
+            "joins": [
+                {
+                    "from_table": j.get("from", ""),
+                    "to_table": j.get("to", ""),
+                    "join_type": j.get("type", "JOIN"),
+                    "on_clause": j.get("on", ""),
+                }
+                for j in result.get("joins", [])
+            ],
+            "unreachable": [],
+            "sql_fragment": "",
+        }
+
+        dynamic_schema = _assemble_dynamic_schema(
+            query, tables_from_llm, fields_from_llm, join_path_from_llm,
+            result.get("reasoning", "LLM 慢速通道")
+        )
+
+        return {
+            "tables": tables_from_llm,
+            "fields": fields_from_llm,
+            "anchor": result.get("anchor", ""),
+            "join_path": join_path_from_llm,
+            "dynamic_schema": dynamic_schema,
+            "metadata": {
+                "table_count": len(tables_from_llm),
+                "field_count": len(fields_from_llm),
+                "join_count": len(join_path_from_llm.get("joins", [])),
+                "has_unreachable": False,
+                "channel": "llm",
+                "confidence": 1.0,
+                "reasoning": result.get("reasoning", ""),
+            },
+        }
+
+    except Exception as e:
+        print(f"[LLM 慢速通道异常] {e}")
+        raise
 
 
 def schema_link(
@@ -159,7 +336,10 @@ def schema_link(
     # Step 5: 动态 Schema 组装
     dynamic_schema = _assemble_dynamic_schema(query, tables, fields, join_path, anchor_reason)
 
-    return {
+    # Step 6: 置信度评估（双通道核心决策点）
+    confidence = assess_confidence(query, tables, anchor, fields, join_path)
+
+    fast_result = {
         "tables": tables,
         "fields": fields,
         "anchor": anchor,
@@ -170,8 +350,26 @@ def schema_link(
             "field_count": len(fields),
             "join_count": len(join_path.get("joins", [])),
             "has_unreachable": len(join_path.get("unreachable", [])) > 0,
+            "channel": "fast",
+            "confidence": round(confidence, 4),
         },
     }
+
+    if confidence >= CONFIDENCE_THRESHOLD:
+        print(f"[Schema Linking] 快速通道通过（置信度: {confidence:.2f} ≥ {CONFIDENCE_THRESHOLD}）")
+        return fast_result
+
+    print(f"[Schema Linking] 快速通道置信度不足（{confidence:.2f} < {CONFIDENCE_THRESHOLD}），升级到 LLM 慢速通道")
+
+    # 升级到 LLM 慢速通道
+    try:
+        llm_result = schema_link_llm(query)
+        print(f"[Schema Linking] LLM 慢速通道完成：{llm_result['metadata'].get('reasoning', '')}")
+        return llm_result
+    except Exception as e:
+        print(f"[Schema Linking] LLM 慢速通道失败（{e}），降级返回快速通道结果")
+        fast_result["metadata"]["channel"] = "fast_fallback"
+        return fast_result
 
 
 def _assemble_dynamic_schema(

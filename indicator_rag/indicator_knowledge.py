@@ -7,13 +7,16 @@
 """
 
 import json
+import os
 from typing import Optional
 
 
 class IndicatorKnowledge:
     """指标知识模块：加载指标定义、识别问题中的指标、生成指标知识文本"""
 
-    def __init__(self, config_path: str = "indicators.json"):
+    def __init__(self, config_path: str | None = None):
+        if config_path is None:
+            config_path = os.path.join(os.path.dirname(__file__), "indicators.json")
         with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         self.indicators = {ind["name"]: ind for ind in data["indicators"]}

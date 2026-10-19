@@ -14,8 +14,8 @@
       "name": "销售成本",
       "aliases": ["成本", "销售成本"],
       "definition": "已售产品的实际成本，等于材料成本加人工成本乘以数量",
-      "formula": "SUM((p.material_cost + p.labor_cost) * o.quantity)",
-      "data_source": "sales_orders o JOIN dim_products p ON o.product_id = p.product_id",
+      "formula": "SUM((p.material_cost + p.labor_cost) * o.quantity * r.rate_to_cny)",
+      "data_source": "sales_orders o JOIN dim_products p ON o.product_id = p.product_id JOIN exchange_rates r ON o.order_date = r.rate_date AND o.currency = r.currency",
       "depends_on": [],
       "time_field": "o.order_date",
       "filters": ["o.order_status = 'completed'"]

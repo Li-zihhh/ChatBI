@@ -1,7 +1,7 @@
 """
 指标 RAG 检索模块
 
-第 19 课：用语义检索（LangChain + ChromaDB）替代原 indicator_knowledge.py 的纯关键词匹配。
+用语义检索（LangChain + ChromaDB）替代原 indicator_knowledge.py 的纯关键词匹配。
 从完整指标知识库（indicators_full.json）中检索与用户问题相关的指标定义和计算公式。
 
 核心改进：
@@ -9,12 +9,11 @@
 - 5 个指标 → 13 个核心指标（完整覆盖业务分析场景）
 - 支持依赖指标自动展开（检索到"利润"时自动注入"毛利""期间费用"）
 
-复用第 15 课的 LangChain + ChromaDB 基础设施。
 """
 
 import os
 import json
-from langchain_openai import OpenAIEmbeddings
+from embeddings import DashScopeEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from config import LLM_CONFIG
@@ -34,11 +33,10 @@ def _cosine_relevance_score_fn(distance: float) -> float:
     return 1.0 - distance / 2.0
 
 
-def get_embeddings() -> OpenAIEmbeddings:
-    """构建 LangChain OpenAI Embeddings 实例（复用第 15 课配置）"""
-    return OpenAIEmbeddings(
+def get_embeddings() -> DashScopeEmbeddings:
+    """构建 DashScope Embeddings 实例（百炼 API，非 OpenAI 格式）"""
+    return DashScopeEmbeddings(
         model=LLM_CONFIG["embedding_model"],
-        base_url=LLM_CONFIG["base_url"],
         api_key=LLM_CONFIG["api_key"],
     )
 
@@ -270,58 +268,58 @@ if __name__ == "__main__":
     test_questions = [
         # 直接命中
         ("查询上个月的毛利", "直接包含指标名'毛利'"),
-        ("各产品线的利润是多少", "包含'产品线'和'利润'，语义检索优先命中'产品线收入'"),
-        # 语义等价（不含指标关键词）
-        ("各产品线赚了多少", "不含'收入'但语义等价'产品线收入'"),
-        ("卖出去的东西成本多少", "口语化表达 → 应匹配'销售成本'"),
-        # 复合指标（触发依赖展开）
-        ("今年的毛利率是多少", "毛利率 → 依赖展开'收入'和'毛利'"),
-        # 不相关
-        ("今天天气怎么样", "无关问题，不应命中任何指标"),
+        # ("各产品线的利润是多少", "包含'产品线'和'利润'，语义检索优先命中'产品线收入'"),
+        # # 语义等价（不含指标关键词）
+        # ("各产品线赚了多少", "不含'收入'但语义等价'产品线收入'"),
+        # ("卖出去的东西成本多少", "口语化表达 → 应匹配'销售成本'"),
+        # # 复合指标（触发依赖展开）
+        # ("今年的毛利率是多少", "毛利率 → 依赖展开'收入'和'毛利'"),
+        # # 不相关
+        # ("今天天气怎么样", "无关问题，不应命中任何指标"),
     ]
 
-    print("\n--- 语义检索测试 ---")
-    for question, note in test_questions:
-        print(f"\n{'='*50}")
-        print(f"问题：{question}")
-        print(f"说明：{note}")
-        print("-" * 50)
-
-        results = retrieve_indicators(question)
-        if results:
-            for r in results:
-                dep_tag = " [依赖展开]" if r["is_dependency"] else ""
-                print(
-                    f"  {r['name']:8s} (相似度:{r['score']:.3f}) "
-                    f"[{r['level']}]{dep_tag}"
-                )
-                print(f"    公式: {r['formula']}")
-        else:
-            print("  （未命中任何指标）")
-
-    # 对比关键词匹配
-    print(f"\n\n{'='*60}")
-    print("关键词匹配 vs 语义检索 对比")
-    print("=" * 60)
-
-    # 模拟旧的关键词匹配
-    from indicator_knowledge import IndicatorKnowledge
-    old_ik = IndicatorKnowledge()
-
-    compare_questions = [
-        "各产品线赚了多少",     # 旧方案：无法命中（不含"收入"关键词）
-        "卖出去的东西成本多少", # 旧方案：无法命中
-        "上个月的利润",         # 两者都能命中
-    ]
-
-    for q in compare_questions:
-        old_result = old_ik.detect_indicators(q)
-        new_result = retrieve_indicators(q)
-        new_names = [r["name"] for r in new_result if not r["is_dependency"]]
-
-        print(f"\n  问题：{q}")
-        print(f"    关键词匹配：{old_result if old_result else '未命中'}")
-        print(f"    语义检索：  {new_names if new_names else '未命中'}")
+    # print("\n--- 语义检索测试 ---")
+    # for question, note in test_questions:
+    #     print(f"\n{'='*50}")
+    #     print(f"问题：{question}")
+    #     print(f"说明：{note}")
+    #     print("-" * 50)
+    #
+    #     results = retrieve_indicators(question)
+    #     if results:
+    #         for r in results:
+    #             dep_tag = " [依赖展开]" if r["is_dependency"] else ""
+    #             print(
+    #                 f"  {r['name']:8s} (相似度:{r['score']:.3f}) "
+    #                 f"[{r['level']}]{dep_tag}"
+    #             )
+    #             print(f"    公式: {r['formula']}")
+    #     else:
+    #         print("  （未命中任何指标）")
+    #
+    # # 对比关键词匹配
+    # print(f"\n\n{'='*60}")
+    # print("关键词匹配 vs 语义检索 对比")
+    # print("=" * 60)
+    #
+    # # 模拟旧的关键词匹配
+    # from indicator_rag.indicator_knowledge import IndicatorKnowledge
+    # old_ik = IndicatorKnowledge()
+    #
+    # compare_questions = [
+    #     "各产品线赚了多少",     # 旧方案：无法命中（不含"收入"关键词）
+    #     "卖出去的东西成本多少", # 旧方案：无法命中
+    #     "上个月的利润",         # 两者都能命中
+    # ]
+    #
+    # for q in compare_questions:
+    #     old_result = old_ik.detect_indicators(q)
+    #     new_result = retrieve_indicators(q)
+    #     new_names = [r["name"] for r in new_result if not r["is_dependency"]]
+    #
+    #     print(f"\n  问题：{q}")
+    #     print(f"    关键词匹配：{old_result if old_result else '未命中'}")
+    #     print(f"    语义检索：  {new_names if new_names else '未命中'}")
 
     # 生成 Prompt 知识块示例
     print(f"\n\n{'='*60}")

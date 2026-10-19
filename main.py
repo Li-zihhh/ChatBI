@@ -2,19 +2,16 @@ import re
 import sys
 from decimal import Decimal
 
-from indicator_knowledge import IndicatorKnowledge
+from indicator_rag.indicator_knowledge import IndicatorKnowledge
 from query_parser import QueryParser
 from prompt_builder import build_prompt
 from llm_client import LLMClient
-from database import DatabaseClient, QueryExecutionError
+from database import DatabaseClient
 from result_formatter import ResultFormatter
 from error_analyzer import ErrorAnalyzer
-from config import LLM_ANALYZER_CONFIG, LLM_CONFIG
+from config import LLM_ANALYZER_CONFIG
 import json
 from typing import Generator
-
-
-from security import SecurityError, UserContext
 
 SYSTEM_PROMPT = '你是一个专业的 SQL 生成助手，只输出 SQL 语句，不要任何额外解释。'
 
@@ -29,6 +26,39 @@ class ChatBISystem:
         self.db = DatabaseClient()
         self.formatter = ResultFormatter()
         self.indicator_knowledge = IndicatorKnowledge()
+
+    def _resolve_indicator_context(
+        self,
+        user_question: str,
+        use_indicator_knowledge: bool,
+        use_indicator_rag: bool,
+        indicator_knowledge: IndicatorKnowledge,
+    ) -> tuple[list[str], str]:
+        """统一解析指标上下文，避免 RAG/关键词路径重复执行同一检索逻辑。"""
+        detected_indicators = []
+        indicator_block = ""
+
+        if use_indicator_rag:
+            try:
+                from indicator_rag.indicator_retriever import retrieve_indicator_context
+
+                context = retrieve_indicator_context(user_question)
+                detected_indicators = context["detected_indicators"]
+                indicator_block = context["indicator_block"]
+            except Exception:
+                detected_indicators = []
+                indicator_block = ""
+
+            if use_indicator_knowledge and not indicator_block:
+                context = indicator_knowledge.get_indicator_context(user_question)
+                detected_indicators = context["detected_indicators"]
+                indicator_block = context["indicator_block"]
+        elif use_indicator_knowledge:
+            context = indicator_knowledge.get_indicator_context(user_question)
+            detected_indicators = context["detected_indicators"]
+            indicator_block = context["indicator_block"]
+
+        return detected_indicators, indicator_block
 
     def run(self,
             user_question: str,
@@ -110,13 +140,16 @@ class ChatBISystem:
             })
             return
 
-        # 2. 构造 Prompt
-        detected_indicators = []
-        indicator_block = ""
+        # 2. 指标知识注入（二选一：RAG 优先，关键词匹配兜底）
+        detected_indicators, indicator_block = self._resolve_indicator_context(
+                user_question=user_question,
+                use_indicator_knowledge=use_indicator_knowledge,
+                use_indicator_rag=use_indicator_rag,
+                indicator_knowledge=self.indicator_knowledge,
+            )
 
-        if use_indicator_knowledge:
-            detected_indicators, indicator_block = self.indicator_knowledge.get_indicator_context(user_question)
 
+        # 3. 构造 Prompt
         system_msg, prompt = build_prompt(
             user_question,
             use_few_shot=use_few_shot,
@@ -126,7 +159,7 @@ class ChatBISystem:
             use_schema_linking=use_schema_linking,
         )
 
-        # 3. 流式生成 SQL —— 逐 chunk 推送
+        # 4. 流式生成 SQL —— 逐 chunk 推送
         sql_parts = []
 
         try:
@@ -138,12 +171,12 @@ class ChatBISystem:
             yield _sse_event("error", {"error": str(e), "error_type": "llm"})
             return
 
-        # 4. 拼接完整 SQL 并清理 markdown 标记
+        # 5. 拼接完整 SQL 并清理 markdown 标记
         raw_sql = "".join(sql_parts)
         sql = re.sub(r'```sql|```', '', raw_sql).strip()
         yield _sse_event("sql_done", {"sql": sql})
 
-        # 5. 执行 SQL
+        # 6. 执行 SQL
 
         try:
             columns, results = self.db.execute(sql)
