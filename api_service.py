@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config import APP_CONFIG
-from main import ChatBISystem
+from text2SQL.chatbi_system import ChatBISystem
 from security import UserContext
 
 logging.basicConfig(

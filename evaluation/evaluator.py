@@ -18,7 +18,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional
 
-from error_analyzer import ErrorAnalyzer
+from text2SQL.error_analyzer import ErrorAnalyzer
 
 from . import metrics
 

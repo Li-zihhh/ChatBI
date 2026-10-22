@@ -11,9 +11,9 @@ Join 推理（join_resolver）三个模块串联为完整 Pipeline。
 """
 
 import json
-from table_retriever import retrieve_tables, build_index
-from field_matcher import match_fields, build_field_index
-from join_resolver import (
+from .table_retriever import retrieve_tables, build_index
+from .field_matcher import match_fields, build_field_index
+from .join_resolver import (
     select_anchor,
     resolve_joins,
     _is_connected,
@@ -143,7 +143,7 @@ def schema_link_llm(query: str) -> dict:
     LLM 慢速通道：用一次调用完成表选择 + 字段匹配 + Join 推理
     （遵循 docs/schema_linking_optimization.md 8.4 节设计）
     """
-    from llm_client import LLMClient
+    from text2SQL.llm_client import LLMClient
     from config import LLM_CONFIG
 
     llm = LLMClient(config=LLM_CONFIG)

@@ -11,8 +11,8 @@ from typing import Callable
 
 from pydantic import BaseModel, Field, ValidationError
 
-from llm_client import LLMClient
-from prompt_builder import SCHEMA
+from text2SQL.llm_client import LLMClient
+from text2SQL.prompt_builder import SCHEMA
 
 
 class DecomposedTask(BaseModel):

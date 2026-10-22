@@ -16,7 +16,7 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field
 
 from config import LLM_CONFIG
-from llm_client import LLMClient
+from text2SQL.llm_client import LLMClient
 
 
 ReportTextGenerator = Callable[[str, str], str]

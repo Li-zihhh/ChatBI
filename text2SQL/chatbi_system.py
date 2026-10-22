@@ -22,7 +22,7 @@ class ChatBISystem:
     def __init__(self):
         self.parser = QueryParser()
         self.llm = LLMClient()
-        self.analyzer_llm = LLMClient(config=LLM_ANALYZER_CONFIG) #TODO 需要重新设计llm_client,
+        self.analyzer_llm = LLMClient(config=LLM_ANALYZER_CONFIG) #需要重新设计llm_client,
         self.db = DatabaseClient()
         self.formatter = ResultFormatter()
         self.indicator_knowledge = IndicatorKnowledge()

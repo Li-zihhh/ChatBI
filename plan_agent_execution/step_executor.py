@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Literal
 
-from main import ChatBISystem
+from text2SQL.chatbi_system import ChatBISystem
 from .middle_state import (
     ExecutionPlan,
     IntermediateResultStore,
