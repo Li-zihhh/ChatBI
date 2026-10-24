@@ -9,6 +9,8 @@
 """
 
 import os
+from functools import lru_cache
+
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from config import LLM_CONFIG
@@ -113,11 +115,12 @@ def _cosine_relevance_score_fn(distance: float) -> float:
     """
     将 ChromaDB 的 cosine 距离转换为余弦相似度。
 
-    ChromaDB 在 hnsw:space=cosine 模式下，distance = 1 - cosine_similarity。
-    因此 cosine_similarity = 1 - distance，值域 [-1, 1]，
-    与第 14 课手写余弦相似度一致，方便对比。
+    ChromaDB 在 hnsw:space=cosine 模式下 distance = 1 - cosine_similarity，
+    值域 [0, 2]。若不除以 2 直接做 1 - distance，结果值域是 [-1, 1]，
+    阈值（如 0.2/0.3）的语义会与指标检索器（1 - distance/2，值域 [0, 1]）不一致，
+    召回噪声也会被放大。这里统一为除以 2 的归一化口径。
     """
-    return 1 - distance
+    return 1.0 - distance / 2.0
 
 
 def get_embeddings() -> DashScopeEmbeddings:
@@ -128,16 +131,17 @@ def get_embeddings() -> DashScopeEmbeddings:
     )
 
 
+@lru_cache(maxsize=1)
 def get_vectorstore() -> Chroma:
     """
     获取或创建 ChromaDB 向量存储实例。
 
     关键配置：
     - collection_metadata={"hnsw:space": "cosine"}：使用 cosine 距离而非默认的 L2 距离
-    - relevance_score_fn：将 cosine 距离转换回余弦相似度（与第 14 课一致）
+    - relevance_score_fn：将 cosine 距离转换回 [0, 1] 相似度
 
-    如果不指定 cosine 空间，ChromaDB 默认使用 L2 距离，
-    LangChain 的默认分数转换 (1 - distance/2) 在 L2 距离超过 2 时会产生负值。
+    用 lru_cache 做进程级单例：早期实现每次检索都新建 Chroma 实例 +
+    Embedding 客户端，既重复建立连接也重复打开索引文件。
     """
     return Chroma(
         collection_name="table_descriptions",

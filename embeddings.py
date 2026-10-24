@@ -1,4 +1,4 @@
-﻿"""
+"""
 DashScope Embedding 封装模块。
 
 DashScope 的 Embedding API 输入格式与 OpenAI 不同：
@@ -9,6 +9,8 @@ DashScope: {"input": {"texts": ["text1", "text2"]}}
 """
 
 import math
+import time
+from functools import lru_cache
 from typing import List
 
 import requests
@@ -20,6 +22,8 @@ DASHSCOPE_EMBEDDING_URL = (
 )
 
 MAX_BATCH_SIZE = 10
+MAX_RETRIES = 2
+RETRY_BACKOFF = 0.5
 
 
 class DashScopeEmbeddings(Embeddings):
@@ -37,28 +41,47 @@ class DashScopeEmbeddings(Embeddings):
     def _call_api(
         self, texts: List[str], text_type: str = "document"
     ) -> List[List[float]]:
-        """调用 DashScope 原生 Embedding API（单次请求，不超过 MAX_BATCH_SIZE）。"""
-        response = requests.post(
-            DASHSCOPE_EMBEDDING_URL,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self.model,
-                "input": {"texts": texts},
-                "parameters": {"text_type": text_type},
-            },
-            timeout=60,
-        )
-        if not response.ok:
-            print(f"[DashScopeEmbeddings] HTTP {response.status_code}: {response.text}")
-        response.raise_for_status()
-        result = response.json()
-        embeddings = sorted(
-            result["output"]["embeddings"], key=lambda x: x["text_index"]
-        )
-        return [item["embedding"] for item in embeddings]
+        """调用 DashScope 原生 Embedding API（单次请求，不超过 MAX_BATCH_SIZE）。
+
+        带指数退避重试：Embedding 失败会让整条检索链路降级到关键词匹配，
+        代价远高于重试一次。
+        """
+        payload = {
+            "model": self.model,
+            "input": {"texts": texts},
+            "parameters": {"text_type": text_type},
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        last_exc: Exception | None = None
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                response = requests.post(
+                    DASHSCOPE_EMBEDDING_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=60,
+                )
+                if not response.ok:
+                    print(f"[DashScopeEmbeddings] HTTP {response.status_code}: {response.text}")
+                response.raise_for_status()
+                result = response.json()
+                embeddings = sorted(
+                    result["output"]["embeddings"], key=lambda x: x["text_index"]
+                )
+                return [item["embedding"] for item in embeddings]
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= MAX_RETRIES:
+                    raise
+                delay = RETRY_BACKOFF * (2**attempt)
+                print(f"[DashScopeEmbeddings] 调用失败，{delay:.1f}s 后重试：{exc}")
+                time.sleep(delay)
+
+        raise last_exc  # pragma: no cover
 
     def _call_api_batched(
         self, texts: List[str], text_type: str = "document"
@@ -84,5 +107,17 @@ class DashScopeEmbeddings(Embeddings):
         return self._call_api_batched(texts, text_type="document")
 
     def embed_query(self, text: str) -> List[float]:
-        """嵌入查询文本（用于检索）。"""
-        return self._call_api([text], text_type="query")[0]
+        """嵌入查询文本（用于检索）。
+
+        查询向量做进程级缓存：ChatBI 的流量形态是"同一批问题被反复追问"，
+        而单次请求最坏情况下要跑 4 次向量化（表召回 2 次 + 字段匹配 + 指标检索）。
+        缓存后重复问题可省掉全部 Embedding 往返（每次 100~300ms）。
+        """
+        return list(_embed_query_cached(text, self.model, self.api_key))
+
+
+@lru_cache(maxsize=512)
+def _embed_query_cached(text: str, model: str, api_key: str | None) -> tuple:
+    """可哈希缓存包装：返回 tuple 以便 lru_cache 存储。"""
+    instance = DashScopeEmbeddings(model=model, api_key=api_key)
+    return tuple(instance._call_api([text], text_type="query")[0])

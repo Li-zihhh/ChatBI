@@ -10,7 +10,11 @@ Join 推理（join_resolver）三个模块串联为完整 Pipeline。
 替代原 prompt_builder.py 中的硬编码全量 Schema 注入方式。
 """
 
+import copy
 import json
+import logging
+from functools import lru_cache
+
 from .table_retriever import retrieve_tables, build_index
 from .field_matcher import match_fields, build_field_index
 from .join_resolver import (
@@ -24,6 +28,8 @@ from .join_resolver import (
     TABLE_KEYWORDS,
 )
 
+logger = logging.getLogger("chatbi.schema_linking")
+
 
 # ==================== Schema Linking Pipeline ====================
 def _score_table_by_keywords(query: str, table_name: str) -> int:
@@ -32,7 +38,11 @@ def _score_table_by_keywords(query: str, table_name: str) -> int:
     return sum(1 for kw in keywords if kw in query)
 
 
-def _ensure_fact_table_for_metric(query: str, tables: list[dict]) -> list[dict]:
+def _ensure_fact_table_for_metric(
+    query: str,
+    tables: list[dict],
+    pool: list[dict] | None = None,
+) -> list[dict]:
     """
     兜底策略：对于指标型问题，确保召回结果中包含语义最相关的事实表。
 
@@ -45,6 +55,10 @@ def _ensure_fact_table_for_metric(query: str, tables: list[dict]) -> list[dict]:
     2. 用 TABLE_KEYWORDS 给所有事实表打分；
     3. 若当前召回的事实表不是关键词得分最高的事实表，则把最高分事实表补充进来；
     4. 若当前未召回任何事实表，则放宽阈值检索并补充最相关事实表。
+
+    Args:
+        pool: 已放宽阈值召回的全量候选表。传入后不再重复触发一次
+              Embedding 检索（早期实现对同一 query 会向量化两次）。
     """
     if not any(w in query for w in STRONG_METRIC_WORDS):
         return tables
@@ -56,8 +70,10 @@ def _ensure_fact_table_for_metric(query: str, tables: list[dict]) -> list[dict]:
         t for t in tables if TABLE_TYPES.get(t["table_name"]) == "fact"
     ]
 
-    # 放宽阈值，获取更大范围的候选表，用于关键词评分
-    all_tables = retrieve_tables(query, top_k=10, score_threshold=0.0)
+    # 复用外部传入的宽召回结果，避免重复 Embedding 调用
+    all_tables = pool if pool is not None else retrieve_tables(
+        query, top_k=10, score_threshold=0.0
+    )
     all_fact_tables = [
         t for t in all_tables if TABLE_TYPES.get(t["table_name"]) == "fact"
     ]
@@ -138,15 +154,21 @@ def assess_confidence(
 
 
 # ==================== LLM 慢速通道 ====================
+@lru_cache(maxsize=1)
+def _get_llm_client():
+    """慢速通道复用的 LLM 客户端（进程级单例，避免每次调用重新建连接池）。"""
+    from text2SQL.llm_client import LLMClient
+    from config import LLM_CONFIG
+
+    return LLMClient(config=LLM_CONFIG)
+
+
 def schema_link_llm(query: str) -> dict:
     """
     LLM 慢速通道：用一次调用完成表选择 + 字段匹配 + Join 推理
     （遵循 docs/schema_linking_optimization.md 8.4 节设计）
     """
-    from text2SQL.llm_client import LLMClient
-    from config import LLM_CONFIG
-
-    llm = LLMClient(config=LLM_CONFIG)
+    llm = _get_llm_client()
 
     prompt = f"""你是一个数据库 Schema 分析专家。已知以下数据库表结构：
 
@@ -293,11 +315,32 @@ def schema_link(
             }
         }
     """
-    # Step 1: 表召回
-    tables = retrieve_tables(query, top_k=table_top_k, score_threshold=table_threshold)
+    # 结果只依赖问题文本与检索参数（行级权限在 SQL 生成后由 security 层施加），
+    # 因此可以做进程级缓存；重复提问可直接省掉全部 Embedding 往返。
+    cached = _schema_link_cached(
+        query, table_top_k, field_top_k, table_threshold, field_threshold, include_join
+    )
+    return copy.deepcopy(cached)
+
+
+@lru_cache(maxsize=256)
+def _schema_link_cached(
+    query: str,
+    table_top_k: int,
+    field_top_k: int,
+    table_threshold: float,
+    field_threshold: float,
+    include_join: bool,
+) -> dict:
+    """带缓存的 Pipeline 实现；调用方拿到的应是 deepcopy。"""
+    # Step 1: 一次宽召回，同时用于阈值筛选与指标兜底（避免同一 query 向量化两次）
+    wide_tables = retrieve_tables(
+        query, top_k=max(table_top_k, 10), score_threshold=0.0
+    )
+    tables = [t for t in wide_tables if t["score"] >= table_threshold][:table_top_k]
 
     # 兜底：指标型问题必须召回事实表，否则 SQL 无法生成
-    tables = _ensure_fact_table_for_metric(query, tables)
+    tables = _ensure_fact_table_for_metric(query, tables, pool=wide_tables)
 
     candidate_table_names = [t["table_name"] for t in tables]
 
@@ -314,6 +357,8 @@ def schema_link(
                 "field_count": 0,
                 "join_count": 0,
                 "has_unreachable": False,
+                "channel": "empty",
+                "confidence": 0.0,
             },
         }
 
@@ -356,18 +401,29 @@ def schema_link(
     }
 
     if confidence >= CONFIDENCE_THRESHOLD:
-        print(f"[Schema Linking] 快速通道通过（置信度: {confidence:.2f} ≥ {CONFIDENCE_THRESHOLD}）")
+        logger.debug(
+            "Schema Linking 快速通道通过（置信度 %.2f ≥ %.2f）",
+            confidence,
+            CONFIDENCE_THRESHOLD,
+        )
         return fast_result
 
-    print(f"[Schema Linking] 快速通道置信度不足（{confidence:.2f} < {CONFIDENCE_THRESHOLD}），升级到 LLM 慢速通道")
+    logger.info(
+        "Schema Linking 快速通道置信度不足（%.2f < %.2f），升级到 LLM 慢速通道",
+        confidence,
+        CONFIDENCE_THRESHOLD,
+    )
 
     # 升级到 LLM 慢速通道
     try:
         llm_result = schema_link_llm(query)
-        print(f"[Schema Linking] LLM 慢速通道完成：{llm_result['metadata'].get('reasoning', '')}")
+        logger.info(
+            "Schema Linking LLM 慢速通道完成：%s",
+            llm_result["metadata"].get("reasoning", ""),
+        )
         return llm_result
-    except Exception as e:
-        print(f"[Schema Linking] LLM 慢速通道失败（{e}），降级返回快速通道结果")
+    except Exception as exc:
+        logger.warning("Schema Linking LLM 慢速通道失败（%s），降级返回快速通道结果", exc)
         fast_result["metadata"]["channel"] = "fast_fallback"
         return fast_result
 
@@ -447,8 +503,8 @@ def build_dynamic_prompt_schema(query: str) -> str:
         if result["metadata"]["table_count"] == 0:
             return ""  # 无召回，触发 fallback
         return result["dynamic_schema"]
-    except Exception as e:
-        print(f"[Schema Linking 异常] {e}，将回退到全量 Schema")
+    except Exception as exc:
+        logger.warning("Schema Linking 异常（%s），将回退到全量 Schema", exc)
         return ""
 
 

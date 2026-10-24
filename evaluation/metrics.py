@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
+import datetime
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Tuple
 
 # SQL 子句关键字,顺序决定了 _clause_spans 的扫描顺序
@@ -309,8 +311,110 @@ def compare(golden_sql: str, generated_sql: str) -> Dict[str, object]:
     }
 
 
-def rows_equal(rows_a: list, rows_b: list) -> bool:
-    """比较两个结果集是否等价 (忽略行顺序)。"""
-    a = sorted([repr(r) for r in (rows_a or [])])
-    b = sorted([repr(r) for r in (rows_b or [])])
-    return a == b
+def _to_decimal(value) -> "Decimal | None":
+    """尽量把值转成 Decimal，用于数值等价比较。
+
+    bool 不参与数值比较（True == 1 在业务上没有意义）。
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
+    if isinstance(value, str):
+        text = value.strip().replace(",", "")
+        if not text:
+            return None
+        try:
+            return Decimal(text)
+        except (InvalidOperation, ValueError):
+            return None
+    return None
+
+
+def _as_date(value):
+    """把 date/datetime 或 ISO 字符串统一成 date/datetime，便于跨类型比较。"""
+    if isinstance(value, (datetime.date, datetime.datetime)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        for parser in (datetime.datetime.fromisoformat, datetime.date.fromisoformat):
+            try:
+                return parser(text)
+            except ValueError:
+                continue
+    return None
+
+
+def _to_date_only(value):
+    """取出日期部分（datetime → date）。"""
+    if isinstance(value, datetime.datetime):
+        return value.date()
+    return value
+
+
+def cell_equal(a, b, tol: float = 1e-6) -> bool:
+    """单元格级等价判定。
+
+    处理三类历史上会产生假阴性的情况：
+      1. `Decimal("100.00")` 与 `100.0` —— 数值等价
+      2. 浮点误差 `0.1 + 0.2` 与 `0.3` —— 相对容差
+      3. 数据库返回 date/datetime 而黄金 SQL 侧是字符串 —— 统一解析后比较
+
+    日期比较策略：两侧都是 datetime 时比完整时间；类型不一致（date vs datetime）
+    时只比日期部分——BI 场景下同一列的日期/时间混用通常来自驱动差异，不是语义差异。
+    """
+    if a is None or b is None:
+        return a is b or a == b
+
+    da, db = _to_decimal(a), _to_decimal(b)
+    if da is not None and db is not None:
+        if da == db:
+            return True
+        scale = max(abs(da), abs(db), Decimal(1))
+        return abs(da - db) <= Decimal(str(tol)) * scale
+
+    date_a, date_b = _as_date(a), _as_date(b)
+    if date_a is not None and date_b is not None:
+        if isinstance(date_a, datetime.datetime) and isinstance(date_b, datetime.datetime):
+            return date_a == date_b
+        return _to_date_only(date_a) == _to_date_only(date_b)
+
+    return str(a).strip() == str(b).strip()
+
+
+def rows_equal(
+    rows_a: list,
+    rows_b: list,
+    order_sensitive: bool = False,
+    tol: float = 1e-6,
+) -> bool:
+    """比较两个结果集是否等价。
+
+    默认忽略行顺序（SQL 未写 ORDER BY 时顺序本就不保证）。
+    早期实现用 `repr` 字符串比较，会让 `Decimal('100.00')` 与 `100.0` 判为不等，
+    在财务场景下产生大量假阴性。
+    """
+    rows_a = [tuple(row) for row in (rows_a or [])]
+    rows_b = [tuple(row) for row in (rows_b or [])]
+
+    if len(rows_a) != len(rows_b):
+        return False
+    if not rows_a and not rows_b:
+        return True
+
+    def sort_key(row):
+        return tuple("" if value is None else str(value) for value in row)
+
+    if not order_sensitive:
+        rows_a = sorted(rows_a, key=sort_key)
+        rows_b = sorted(rows_b, key=sort_key)
+
+    for row_a, row_b in zip(rows_a, rows_b):
+        if len(row_a) != len(row_b):
+            return False
+        if not all(cell_equal(x, y, tol) for x, y in zip(row_a, row_b)):
+            return False
+    return True

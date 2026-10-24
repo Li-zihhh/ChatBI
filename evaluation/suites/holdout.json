@@ -1,0 +1,70 @@
+{
+  "name": "holdout（留出集）",
+  "description": "由 16 条 dev 用例 × 3 种问法改写而成，黄金 SQL 与 dev 一致。用途：衡量对『问法变化』的泛化能力。纪律：禁止根据本集结果修改 Prompt / RULES / Few-shot；如需迭代，另建新的留出集。",
+  "frozen": true,
+  "cases": [
+    { "id": "h01", "question": "completed 状态的订单一共有多少笔？", "golden_sql": "SELECT COUNT(*) AS order_count FROM sales_orders WHERE order_status = 'completed';", "difficulty": "easy", "category": "single_table" },
+    { "id": "h02", "question": "帮我统计下已经完成的订单数量", "golden_sql": "SELECT COUNT(*) AS order_count FROM sales_orders WHERE order_status = 'completed';", "difficulty": "easy", "category": "single_table" },
+    { "id": "h03", "question": "现在系统里完成的订单总共几单", "golden_sql": "SELECT COUNT(*) AS order_count FROM sales_orders WHERE order_status = 'completed';", "difficulty": "easy", "category": "single_table" },
+
+    { "id": "h04", "question": "Germany 这个国家有多少客户？", "golden_sql": "SELECT COUNT(*) AS customer_count FROM dim_customers WHERE country = 'Germany';", "difficulty": "easy", "category": "single_table" },
+    { "id": "h05", "question": "统计德国的客户总数", "golden_sql": "SELECT COUNT(*) AS customer_count FROM dim_customers WHERE country = 'Germany';", "difficulty": "easy", "category": "single_table" },
+    { "id": "h06", "question": "注册地在德国的客户有几家", "golden_sql": "SELECT COUNT(*) AS customer_count FROM dim_customers WHERE country = 'Germany';", "difficulty": "easy", "category": "single_table" },
+
+    { "id": "h07", "question": "不同类型的客户各自完成了多少订单？", "golden_sql": "SELECT c.customer_type, COUNT(*) AS order_count FROM sales_orders o JOIN dim_customers c ON o.customer_id = c.customer_id WHERE o.order_status = 'completed' GROUP BY c.customer_type;", "difficulty": "medium", "category": "join" },
+    { "id": "h08", "question": "以客户类型分组，统计已完成订单数", "golden_sql": "SELECT c.customer_type, COUNT(*) AS order_count FROM sales_orders o JOIN dim_customers c ON o.customer_id = c.customer_id WHERE o.order_status = 'completed' GROUP BY c.customer_type;", "difficulty": "medium", "category": "join" },
+    { "id": "h09", "question": "OEM整车厂、储能集成商这些客户类型分别完成了多少订单", "golden_sql": "SELECT c.customer_type, COUNT(*) AS order_count FROM sales_orders o JOIN dim_customers c ON o.customer_id = c.customer_id WHERE o.order_status = 'completed' GROUP BY c.customer_type;", "difficulty": "medium", "category": "join" },
+
+    { "id": "h10", "question": "各产品线的净收入是多少", "golden_sql": "SELECT p.product_line, SUM(o.net_amount) AS revenue FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' GROUP BY p.product_line;", "difficulty": "medium", "category": "aggregation" },
+    { "id": "h11", "question": "分产品线看一下未税销售额", "golden_sql": "SELECT p.product_line, SUM(o.net_amount) AS revenue FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' GROUP BY p.product_line;", "difficulty": "medium", "category": "aggregation" },
+    { "id": "h12", "question": "按产品线列出不含税收入", "golden_sql": "SELECT p.product_line, SUM(o.net_amount) AS revenue FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' GROUP BY p.product_line;", "difficulty": "medium", "category": "aggregation" },
+
+    { "id": "h13", "question": "2026年Q1的费用合计是多少", "golden_sql": "SELECT SUM(rd_expense + selling_expense + admin_expense + finance_expense) AS total_expense FROM finance_expenses WHERE expense_date >= '2026-01-01' AND expense_date < '2026-04-01';", "difficulty": "medium", "category": "finance" },
+    { "id": "h14", "question": "2026年一季度（1月到3月）所有费用加总", "golden_sql": "SELECT SUM(rd_expense + selling_expense + admin_expense + finance_expense) AS total_expense FROM finance_expenses WHERE expense_date >= '2026-01-01' AND expense_date < '2026-04-01';", "difficulty": "medium", "category": "finance" },
+    { "id": "h15", "question": "统计 2026 年前三个月四项期间费用总和", "golden_sql": "SELECT SUM(rd_expense + selling_expense + admin_expense + finance_expense) AS total_expense FROM finance_expenses WHERE expense_date >= '2026-01-01' AND expense_date < '2026-04-01';", "difficulty": "medium", "category": "finance" },
+
+    { "id": "h16", "question": "近三个月欧洲区的收入，折算成人民币", "golden_sql": "SELECT SUM(o.net_amount * e.rate_to_cny) AS revenue FROM sales_orders o JOIN exchange_rates e ON o.order_date = e.rate_date AND o.currency = e.currency WHERE o.region = '欧洲' AND o.order_status = 'completed' AND o.order_date >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH);", "difficulty": "hard", "category": "exchange_rate" },
+    { "id": "h17", "question": "欧洲市场过去三个月的销售额，按汇率换成人民币", "golden_sql": "SELECT SUM(o.net_amount * e.rate_to_cny) AS revenue FROM sales_orders o JOIN exchange_rates e ON o.order_date = e.rate_date AND o.currency = e.currency WHERE o.region = '欧洲' AND o.order_status = 'completed' AND o.order_date >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH);", "difficulty": "hard", "category": "exchange_rate" },
+    { "id": "h18", "question": "最近3个月欧洲区域的不含税收入（人民币口径）", "golden_sql": "SELECT SUM(o.net_amount * e.rate_to_cny) AS revenue FROM sales_orders o JOIN exchange_rates e ON o.order_date = e.rate_date AND o.currency = e.currency WHERE o.region = '欧洲' AND o.order_status = 'completed' AND o.order_date >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH);", "difficulty": "hard", "category": "exchange_rate" },
+
+    { "id": "h19", "question": "这个月每个部门花了多少研发费用", "golden_sql": "SELECT department, SUM(rd_expense) AS rd_total FROM finance_expenses WHERE expense_date >= DATE_FORMAT(CURDATE(), '%Y-%m-01') AND expense_date <= CURDATE() GROUP BY department;", "difficulty": "hard", "category": "time" },
+    { "id": "h20", "question": "当月各部门研发费用汇总", "golden_sql": "SELECT department, SUM(rd_expense) AS rd_total FROM finance_expenses WHERE expense_date >= DATE_FORMAT(CURDATE(), '%Y-%m-01') AND expense_date <= CURDATE() GROUP BY department;", "difficulty": "hard", "category": "time" },
+    { "id": "h21", "question": "本月按部门统计研发投入", "golden_sql": "SELECT department, SUM(rd_expense) AS rd_total FROM finance_expenses WHERE expense_date >= DATE_FORMAT(CURDATE(), '%Y-%m-01') AND expense_date <= CURDATE() GROUP BY department;", "difficulty": "hard", "category": "time" },
+
+    { "id": "h22", "question": "每条产品线的毛利率分别是多少", "golden_sql": "SELECT p.product_line, (SUM(o.net_amount) - SUM((p.material_cost + p.labor_cost) * o.quantity)) / SUM(o.net_amount) AS gross_margin FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' GROUP BY p.product_line;", "difficulty": "hard", "category": "gross_margin" },
+    { "id": "h23", "question": "按产品线算一下毛利率（毛利除以收入）", "golden_sql": "SELECT p.product_line, (SUM(o.net_amount) - SUM((p.material_cost + p.labor_cost) * o.quantity)) / SUM(o.net_amount) AS gross_margin FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' GROUP BY p.product_line;", "difficulty": "hard", "category": "gross_margin" },
+    { "id": "h24", "question": "产品线维度的盈利能力，用毛利率表示", "golden_sql": "SELECT p.product_line, (SUM(o.net_amount) - SUM((p.material_cost + p.labor_cost) * o.quantity)) / SUM(o.net_amount) AS gross_margin FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' GROUP BY p.product_line;", "difficulty": "hard", "category": "gross_margin" },
+
+    { "id": "h25", "question": "把取消掉的订单号都列出来", "golden_sql": "SELECT order_no FROM sales_orders WHERE order_status = 'cancelled';", "difficulty": "easy", "category": "single_table" },
+    { "id": "h26", "question": "cancelled 状态的订单编号有哪些", "golden_sql": "SELECT order_no FROM sales_orders WHERE order_status = 'cancelled';", "difficulty": "easy", "category": "single_table" },
+    { "id": "h27", "question": "被取消的订单，单号给我看一下", "golden_sql": "SELECT order_no FROM sales_orders WHERE order_status = 'cancelled';", "difficulty": "easy", "category": "single_table" },
+
+    { "id": "h28", "question": "各大区的订单金额换算成人民币后分别是多少", "golden_sql": "SELECT o.region, SUM(o.net_amount * e.rate_to_cny) AS revenue FROM sales_orders o JOIN exchange_rates e ON o.order_date = e.rate_date AND o.currency = e.currency WHERE o.order_status = 'completed' GROUP BY o.region;", "difficulty": "hard", "category": "exchange_rate" },
+    { "id": "h29", "question": "按销售区域汇总订单收入，人民币口径", "golden_sql": "SELECT o.region, SUM(o.net_amount * e.rate_to_cny) AS revenue FROM sales_orders o JOIN exchange_rates e ON o.order_date = e.rate_date AND o.currency = e.currency WHERE o.order_status = 'completed' GROUP BY o.region;", "difficulty": "hard", "category": "exchange_rate" },
+    { "id": "h30", "question": "各区域销售额（折合人民币）", "golden_sql": "SELECT o.region, SUM(o.net_amount * e.rate_to_cny) AS revenue FROM sales_orders o JOIN exchange_rates e ON o.order_date = e.rate_date AND o.currency = e.currency WHERE o.order_status = 'completed' GROUP BY o.region;", "difficulty": "hard", "category": "exchange_rate" },
+
+    { "id": "h31", "question": "储能集成商这类客户有几家", "golden_sql": "SELECT COUNT(*) AS customer_count FROM dim_customers WHERE customer_type = '储能集成商';", "difficulty": "easy", "category": "single_table" },
+    { "id": "h32", "question": "统计客户类型为储能集成商的数量", "golden_sql": "SELECT COUNT(*) AS customer_count FROM dim_customers WHERE customer_type = '储能集成商';", "difficulty": "easy", "category": "single_table" },
+    { "id": "h33", "question": "做储能集成的客户总数是多少", "golden_sql": "SELECT COUNT(*) AS customer_count FROM dim_customers WHERE customer_type = '储能集成商';", "difficulty": "easy", "category": "single_table" },
+
+    { "id": "h34", "question": "换电运营商这些客户都分布在哪些国家", "golden_sql": "SELECT DISTINCT country FROM dim_customers WHERE customer_type = '换电运营商';", "difficulty": "easy", "category": "single_table" },
+    { "id": "h35", "question": "列出换电运营商客户所在的国家（去重）", "golden_sql": "SELECT DISTINCT country FROM dim_customers WHERE customer_type = '换电运营商';", "difficulty": "easy", "category": "single_table" },
+    { "id": "h36", "question": "换电运营商的客户来自哪些国家", "golden_sql": "SELECT DISTINCT country FROM dim_customers WHERE customer_type = '换电运营商';", "difficulty": "easy", "category": "single_table" },
+
+    { "id": "h37", "question": "三元锂、磷酸铁锂这些技术路线的平均标准成本是多少", "golden_sql": "SELECT tech_route, AVG(standard_cost) AS avg_standard_cost FROM dim_products GROUP BY tech_route;", "difficulty": "easy", "category": "aggregation" },
+    { "id": "h38", "question": "按技术路线看平均标准成本", "golden_sql": "SELECT tech_route, AVG(standard_cost) AS avg_standard_cost FROM dim_products GROUP BY tech_route;", "difficulty": "easy", "category": "aggregation" },
+    { "id": "h39", "question": "各技术路线的标准成本均值", "golden_sql": "SELECT tech_route, AVG(standard_cost) AS avg_standard_cost FROM dim_products GROUP BY tech_route;", "difficulty": "easy", "category": "aggregation" },
+
+    { "id": "h40", "question": "销售费用最高的前三个部门是哪些", "golden_sql": "SELECT department, SUM(selling_expense) AS total_selling FROM finance_expenses GROUP BY department ORDER BY total_selling DESC LIMIT 3;", "difficulty": "medium", "category": "finance" },
+    { "id": "h41", "question": "哪个部门销售费用最多，取前三", "golden_sql": "SELECT department, SUM(selling_expense) AS total_selling FROM finance_expenses GROUP BY department ORDER BY total_selling DESC LIMIT 3;", "difficulty": "medium", "category": "finance" },
+    { "id": "h42", "question": "按销售费用降序排，看 Top3 部门", "golden_sql": "SELECT department, SUM(selling_expense) AS total_selling FROM finance_expenses GROUP BY department ORDER BY total_selling DESC LIMIT 3;", "difficulty": "medium", "category": "finance" },
+
+    { "id": "h43", "question": "2026年6月的毛利总额", "golden_sql": "SELECT SUM(o.net_amount - (p.material_cost + p.labor_cost) * o.quantity) AS gross_profit FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' AND o.order_date >= '2026-06-01' AND o.order_date < '2026-07-01';", "difficulty": "hard", "category": "gross_margin" },
+    { "id": "h44", "question": "2026年6月份完成订单的毛利是多少", "golden_sql": "SELECT SUM(o.net_amount - (p.material_cost + p.labor_cost) * o.quantity) AS gross_profit FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' AND o.order_date >= '2026-06-01' AND o.order_date < '2026-07-01';", "difficulty": "hard", "category": "gross_margin" },
+    { "id": "h45", "question": "统计 2026-06 已完成订单的毛利", "golden_sql": "SELECT SUM(o.net_amount - (p.material_cost + p.labor_cost) * o.quantity) AS gross_profit FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' AND o.order_date >= '2026-06-01' AND o.order_date < '2026-07-01';", "difficulty": "hard", "category": "gross_margin" },
+
+    { "id": "h46", "question": "哪个产品含税销售额最高", "golden_sql": "SELECT p.product_name, SUM(o.gross_amount) AS gross_revenue FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' GROUP BY p.product_name ORDER BY gross_revenue DESC LIMIT 1;", "difficulty": "hard", "category": "aggregation" },
+    { "id": "h47", "question": "含税口径下卖得最多的产品是哪个", "golden_sql": "SELECT p.product_name, SUM(o.gross_amount) AS gross_revenue FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' GROUP BY p.product_name ORDER BY gross_revenue DESC LIMIT 1;", "difficulty": "hard", "category": "aggregation" },
+    { "id": "h48", "question": "按含税总额排序，排第一的产品名称", "golden_sql": "SELECT p.product_name, SUM(o.gross_amount) AS gross_revenue FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' GROUP BY p.product_name ORDER BY gross_revenue DESC LIMIT 1;", "difficulty": "hard", "category": "aggregation" }
+  ]
+}

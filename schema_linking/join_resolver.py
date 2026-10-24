@@ -8,6 +8,8 @@
 2. Join 路径推导（resolve_joins）：已知锚表后，使用一次 BFS 一次性算出到所有目标表的最短路径。
 
 不使用 Embedding，是纯图算法 + 轻量意图识别。
+TODO: 考虑 ：为什么不使用 Embedding 来识别 Join 路径？
+
 """
 
 from collections import deque

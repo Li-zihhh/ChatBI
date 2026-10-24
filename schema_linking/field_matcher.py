@@ -10,6 +10,8 @@
 """
 
 import os
+from functools import lru_cache
+
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from config import LLM_CONFIG
@@ -489,9 +491,11 @@ def _cosine_relevance_score_fn(distance: float) -> float:
     """
     将 ChromaDB 的 cosine 距离转换为余弦相似度。
 
-    与 table_retriever.py 保持一致的分数转换逻辑。
+    与 table_retriever.py / indicator_retriever.py 保持同一种归一化口径：
+    cosine 距离值域 [0, 2]，除以 2 后得到 [0, 1] 的相似度，
+    否则 1 - distance 会落到 [-1, 1]，导致阈值语义漂移。
     """
-    return 1 - distance
+    return 1.0 - distance / 2.0
 
 
 def get_embeddings() -> DashScopeEmbeddings:
@@ -502,8 +506,9 @@ def get_embeddings() -> DashScopeEmbeddings:
     )
 
 
+@lru_cache(maxsize=1)
 def get_vectorstore() -> Chroma:
-    """获取或创建字段描述的 ChromaDB 向量存储实例"""
+    """获取或创建字段描述的 ChromaDB 向量存储实例（进程级单例）"""
     return Chroma(
         collection_name="field_descriptions",
         embedding_function=get_embeddings(),

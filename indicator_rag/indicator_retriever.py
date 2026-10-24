@@ -13,6 +13,8 @@
 
 import os
 import json
+from functools import lru_cache
+
 from embeddings import DashScopeEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -41,8 +43,9 @@ def get_embeddings() -> DashScopeEmbeddings:
     )
 
 
+@lru_cache(maxsize=1)
 def get_vectorstore() -> Chroma:
-    """获取或创建指标描述的 ChromaDB 向量存储实例"""
+    """获取或创建指标描述的 ChromaDB 向量存储实例（进程级单例）。"""
     return Chroma(
         collection_name="indicator_definitions",
         embedding_function=get_embeddings(),
@@ -53,8 +56,12 @@ def get_vectorstore() -> Chroma:
 
 
 # ==================== 指标数据加载 ====================
+@lru_cache(maxsize=1)
 def load_indicators() -> dict[str, dict]:
-    """加载指标知识库，返回 {指标名: 指标定义} 字典"""
+    """加载指标知识库，返回 {指标名: 指标定义} 字典。
+
+    指标库是静态文件，做进程级缓存避免每次请求都重读磁盘 + 反序列化。
+    """
     with open(INDICATORS_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
     return {ind["name"]: ind for ind in data["indicators"]}
