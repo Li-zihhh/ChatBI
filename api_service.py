@@ -654,7 +654,7 @@ async def query_chatbi_stream(payload: QueryRequest, request: Request) -> Stream
 # ==================== 静态文件 ====================
 STATIC_DIR = Path(__file__).parent / "static"
 if STATIC_DIR.is_dir():
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
 
 
 if __name__ == "__main__":

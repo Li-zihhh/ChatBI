@@ -129,14 +129,20 @@ def build_decomposition_prompt(user_question: str) -> tuple[str, str]:
 
 
 class QueryDecomposer:
-    """复杂问题拆解器。"""
+    """复杂问题拆解器。
+
+    timeout 单独设置（默认 90s），因为拆解任务需生成嵌套 JSON，
+    比普通 SQL 生成慢得多，用全局 30s 超时容易误伤。
+    """
 
     def __init__(
         self,
         llm_client: LLMClient | None = None,
         response_generator: Callable[[str, str], str] | None = None,
+        timeout: float = 90.0,
     ):
         self.llm = llm_client or LLMClient()
+        self.llm.timeout = timeout
         self.response_generator = response_generator or self._generate_response
 
     def decompose(self, user_question: str) -> dict:
@@ -171,20 +177,10 @@ class QueryDecomposer:
         raise last_error
 
     def _generate_response(self, system_msg: str, prompt: str) -> str:
-        """默认通过 LLM 生成 JSON 结果。"""
-        response = self.llm.client.chat.completions.create(
-            model=self.llm.model,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0,
-            response_format={"type": "json_object"},
-        )
-        content = response.choices[0].message.content
-        if not content:
-            raise ValueError("LLM 没有返回可用的拆解结果")
-        return content
+        """默认通过 LLM 生成 JSON 结果。
+        走 LLMClient.generate_text()，统一享受超时 + 指数退避重试。
+        """
+        return self.llm.generate_text(system_msg=system_msg, prompt=prompt)
 
     def _parse_plan(self, raw_response: str) -> DecompositionPlan:
         """解析 LLM 返回结果，兼容 Markdown 代码块。"""

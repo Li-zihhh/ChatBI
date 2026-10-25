@@ -1,4 +1,4 @@
-﻿"""
+"""
 PlanAndExecuteAgent 总入口模块
 
 串联 QueryDecomposer → PlanGenerator → StepExecutor → ResultSummarizer → ReportGenerator 全链路。
@@ -46,9 +46,13 @@ class PlanAndExecuteAgent:
         user_question: str,
         decomposition_override: dict[str, Any] | None = None,
         max_steps: int | None = None,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         """Agent 主入口：拆解 → 生成计划 → 执行各步骤 → 汇总 → 生成报告。
-        支持 decomposition_override 跳过拆解阶段，直接使用外部传入的拆解结果。"""
+
+        支持 decomposition_override 跳过拆解阶段，直接使用外部传入的拆解结果。
+        deadline 为 time.monotonic() 口径的绝对截止时间，超出后剩余步骤跳过。
+        """
         if decomposition_override is not None:
             print_progress("使用传入的拆解结果，跳过任务拆解。")
             decomposition = decomposition_override
@@ -62,7 +66,9 @@ class PlanAndExecuteAgent:
         print_progress("开始生成执行计划。")
         plan = self.planner.build_plan(user_question, decomposition)
         print_progress(f"执行计划生成完成，共 {len(plan.steps)} 个步骤。")
-        step_results = self.executor.execute_plan(plan, max_steps=max_steps)
+        step_results = self.executor.execute_plan(
+            plan, max_steps=max_steps, deadline=deadline
+        )
         print_progress("开始生成执行摘要。")
         summary = self.summarizer.summarize(user_question, plan, step_results)
         print_progress("执行摘要生成完成。")

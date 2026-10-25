@@ -21,6 +21,23 @@ def _env_bool(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_str(name: str, default: str) -> str:
+    return os.getenv(name, default).strip().lower()
+
+
+def _thinking_setting() -> str:
+    """思考模式开关：auto / true / false。
+
+    qwen3 系列默认开启 thinking，实测会把首字延迟从 0.8s 推到 30s+，
+    对 Text2SQL 这种结构化输出任务毫无收益。默认关闭。
+    """
+    value = _env_str("LLM_ENABLE_THINKING", "false")
+    return value if value in {"auto", "true", "false"} else "false"
+
+
+_THINKING = _thinking_setting()
+
+
 def _env_int(name: str, default: str) -> int:
     try:
         return int(os.getenv(name, default))
@@ -88,9 +105,13 @@ APP_CONFIG = {
         "temperature": _env_float("LLM_TEMPERATURE", "0.2"),
         "max_tokens": _env_int("LLM_MAX_TOKENS", "4000"),
         # 超时与重试：避免单次请求挂死占满线程池
-        "timeout": _env_float("LLM_TIMEOUT", "30"),
+        "timeout": _env_float("LLM_TIMEOUT", "60"),
         "max_retries": _env_int("LLM_MAX_RETRIES", "2"),
         "retry_backoff": _env_float("LLM_RETRY_BACKOFF", "0.5"),
+        # 超时类错误单独限次：同一 prompt 重试仍会慢，按 max_retries 重试纯属浪费
+        "timeout_retries": _env_int("LLM_TIMEOUT_RETRIES", "1"),
+        # 思考模式：qwen3 默认开启会把首字延迟推到 30s+，对 Text2SQL 无收益
+        "enable_thinking": _THINKING,
     },
     "repair": {
         # SQL 执行失败后的自动修复轮数（0 = 关闭）
@@ -104,9 +125,14 @@ APP_CONFIG = {
         "default_mode": os.getenv("ROUTER_DEFAULT_MODE", "auto"),
         # 灰区是否请 LLM 判断（关闭则只用规则，零额外成本）
         "llm_classify": _env_bool("ROUTER_LLM_CLASSIFY", "true"),
-        # 分析链路预算：子任务上限与建议超时（超时用于提示，不做强制中断）
+        # 分析链路预算：子任务上限与总耗时上限（超出后剩余步骤直接跳过）
         "analysis_max_steps": _env_int("ANALYSIS_MAX_STEPS", "5"),
         "analysis_timeout_seconds": _env_int("ANALYSIS_TIMEOUT_SECONDS", "120"),
+        # 子步骤是否启用 Schema Linking / 指标 RAG。
+        # 默认关闭：子问题是拆解器生成的、表范围已知，走全量手写 Schema 更稳；
+        # 且能省掉每步的 Embedding 往返与"LLM 慢速通道"这次昂贵调用。
+        "analysis_use_schema_linking": _env_bool("ANALYSIS_USE_SCHEMA_LINKING", "false"),
+        "analysis_use_indicator_rag": _env_bool("ANALYSIS_USE_INDICATOR_RAG", "false"),
     },
     "conversation": {
         # 多轮对话开关（关闭后每个请求都是独立单轮）
@@ -166,9 +192,11 @@ LLM_CONFIG = {
     "max_tokens": _env_int("LLM_MAX_TOKENS", "4000"),
     "temperature": _env_float("LLM_TEMPERATURE", "0.2"),
     "embedding_model": os.getenv("EMBEDDING_MODEL", "text-embedding-v3"),
-    "timeout": _env_float("LLM_TIMEOUT", "30"),
+    "timeout": _env_float("LLM_TIMEOUT", "60"),
     "max_retries": _env_int("LLM_MAX_RETRIES", "2"),
     "retry_backoff": _env_float("LLM_RETRY_BACKOFF", "0.5"),
+    "timeout_retries": _env_int("LLM_TIMEOUT_RETRIES", "1"),
+    "enable_thinking": _THINKING,
 }
 
 LLM_ANALYZER_CONFIG = {
@@ -181,9 +209,11 @@ LLM_ANALYZER_CONFIG = {
     "max_tokens": _env_int("LLM_ANALYZER_MAX_TOKENS", "2000"),
     "temperature": _env_float("LLM_ANALYZER_TEMPERATURE", "0.1"),
     "embedding_model": os.getenv("EMBEDDING_MODEL", "text-embedding-v3"),
-    "timeout": _env_float("LLM_ANALYZER_TIMEOUT", "20"),
+    "timeout": _env_float("LLM_ANALYZER_TIMEOUT", "30"),
     "max_retries": _env_int("LLM_MAX_RETRIES", "2"),
     "retry_backoff": _env_float("LLM_RETRY_BACKOFF", "0.5"),
+    "timeout_retries": _env_int("LLM_TIMEOUT_RETRIES", "1"),
+    "enable_thinking": _THINKING,
 }
 
 
