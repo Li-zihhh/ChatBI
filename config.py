@@ -107,6 +107,21 @@ APP_CONFIG = {
         # 分析链路预算：子任务上限与建议超时（超时用于提示，不做强制中断）
         "analysis_max_steps": _env_int("ANALYSIS_MAX_STEPS", "5"),
         "analysis_timeout_seconds": _env_int("ANALYSIS_TIMEOUT_SECONDS", "120"),
+        # 子步骤是否启用 Schema Linking / 指标 RAG。
+        # 默认关闭：子问题由拆解器生成、表范围已知，走全量手写 Schema 更稳，
+        # 且能避开 Schema Linking 的"LLM 慢速通道"这次大 prompt 调用。
+        "analysis_use_schema_linking": _env_bool("ANALYSIS_USE_SCHEMA_LINKING", "false"),
+        "analysis_use_indicator_rag": _env_bool("ANALYSIS_USE_INDICATOR_RAG", "false"),
+    },
+    "analysis": {
+        # 步骤间传参时最多带多少行结果：整份结果集塞进 Prompt 会让大结果直接爆上下文
+        "context_max_rows": _env_int("ANALYSIS_CONTEXT_MAX_ROWS", "20"),
+        # 报告生成时每个步骤最多带多少字表格 + 多少行数据预览
+        "report_max_chars": _env_int("ANALYSIS_REPORT_MAX_CHARS", "1200"),
+        "report_rows_preview": _env_int("ANALYSIS_REPORT_ROWS_PREVIEW", "3"),
+        # 一次分析折算成多少次配额：它实际要 6~12 次 LLM 调用，
+        # 若与普通查询一样只扣 1 次，配额形同虚设
+        "quota_cost": _env_int("ANALYSIS_QUOTA_COST", "5"),
     },
     "conversation": {
         # 多轮对话开关（关闭后每个请求都是独立单轮）
