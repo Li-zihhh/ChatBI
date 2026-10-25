@@ -265,11 +265,104 @@
             padding: 48px 0;
             font-size: 15px;
         }
+        /* 会话栏（多轮对话） */
+        .session-bar {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 10px;
+            font-size: 12px;
+            color: #999;
+            margin-bottom: 8px;
+        }
+        .session-bar button {
+            font-size: 12px;
+            padding: 4px 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            background: #fff;
+            color: #666;
+            cursor: pointer;
+        }
+        .session-bar button:hover {
+            border-color: #4a90e2;
+            color: #4a90e2;
+        }
+        /* 多轮改写提示：让"AI 理解成了什么"对用户透明 */
+        .context-hint {
+            margin-top: 8px;
+            padding: 8px 12px;
+            background: #f5f9ff;
+            border-left: 3px solid #4a90e2;
+            border-radius: 4px;
+            font-size: 13px;
+            color: #4a6a8a;
+            line-height: 1.5;
+        }
+        .context-hint .label {
+            color: #7a8fa6;
+        }
+        /* 路由徽标 */
+        .route-badge {
+            display: inline-block;
+            margin-top: 8px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 12px;
+            background: #eef4ff;
+            color: #4a6a8a;
+        }
+        .route-badge.analysis {
+            background: #fff4e6;
+            color: #a86a1f;
+        }
+        /* 分析报告 */
+        .report-block {
+            margin-top: 12px;
+            padding: 14px 16px;
+            background: #fcfcfd;
+            border: 1px solid #eef0f3;
+            border-radius: 8px;
+            line-height: 1.7;
+        }
+        .report-block .rep-h1 {
+            font-size: 17px;
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 10px;
+        }
+        .report-block .rep-h2 {
+            font-size: 14px;
+            font-weight: 600;
+            color: #4a90e2;
+            margin: 14px 0 6px;
+        }
+        .report-block .rep-h3 {
+            font-size: 13px;
+            font-weight: 600;
+            color: #555;
+            margin: 10px 0 4px;
+        }
+        .report-block .rep-p {
+            font-size: 14px;
+            color: #333;
+            margin-bottom: 6px;
+        }
+        .report-block .rep-li {
+            font-size: 14px;
+            color: #333;
+            padding-left: 6px;
+            margin-bottom: 4px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>ChatBI MVP</h1>
+        <div class="session-bar">
+            <span id="sessionLabel">新会话</span>
+            <button id="newSessionBtn" type="button" onclick="startNewSession()">开启新会话</button>
+        </div>
         <div class="input-area">
             <input
                 type="text"
@@ -289,6 +382,42 @@
     <script>
         const API_BASE = '';  // 同源，不需要额外前缀
         let abortController = null;
+
+        // ==================== 多轮会话 ====================
+        // 会话 ID 由前端生成并随每次请求携带；服务端按键 (user_id, session_id) 隔离上下文
+        let sessionId = newSessionId();
+        let turnCount = 0;
+
+        function newSessionId() {
+            if (window.crypto && crypto.randomUUID) {
+                return crypto.randomUUID();
+            }
+            return 's-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        }
+
+        function updateSessionLabel() {
+            const label = document.getElementById('sessionLabel');
+            if (!label) return;
+            label.textContent = turnCount === 0
+                ? '新会话'
+                : `会话中 · 第 ${turnCount + 1} 轮`;
+        }
+
+        async function startNewSession() {
+            const previous = sessionId;
+            try {
+                await fetch(`${API_BASE}/api/v1/sessions/${encodeURIComponent(previous)}`, {
+                    method: 'DELETE',
+                });
+            } catch (e) {
+                console.warn('清除会话失败（忽略）:', e);
+            }
+            sessionId = newSessionId();
+            turnCount = 0;
+            updateSessionLabel();
+            initialEmpty.style.display = 'block';
+            chatArea.querySelectorAll('.card').forEach((node) => node.remove());
+        }
 
         const questionInput = document.getElementById('questionInput');
         const submitBtn = document.getElementById('submitBtn');
@@ -388,7 +517,7 @@
                 const response = await fetch(`${API_BASE}/api/v1/query/stream`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ question }),
+                    body: JSON.stringify({ question, session_id: sessionId }),
                     signal: abortController.signal,
                 });
 
@@ -431,6 +560,30 @@
                         if (!eventType) continue;
 
                         switch (eventType) {
+                            case 'route':
+                                renderRouteBadge(card, eventData);
+                                break;
+
+                            case 'status':
+                                statusDiv.className = 'status thinking';
+                                statusDiv.textContent = eventData.message || '处理中...';
+                                break;
+
+                            case 'report':
+                                statusDiv.className = 'status';
+                                statusDiv.textContent = eventData.duration_ms
+                                    ? `分析完成，耗时 ${formatTime(eventData.duration_ms)}，共 ${(eventData.steps || []).length} 步`
+                                    : '分析完成';
+                                renderReport(resultSection, eventData);
+                                turnCount += 1;
+                                updateSessionLabel();
+                                break;
+
+                            case 'context':
+                                // 多轮改写结果：告诉用户"我把你的追问理解成了什么"
+                                renderContextHint(card, eventData);
+                                break;
+
                             case 'sql_chunk':
                                 // 过滤空内容
                                 if (!eventData.content) break;
@@ -473,6 +626,8 @@
                                 statusDiv.className = 'status';
                                 statusDiv.textContent = `查询完成，总耗时 ${formatTime(totalTime)}`;
                                 renderResult(resultSection, eventData);
+                                turnCount += 1;
+                                updateSessionLabel();
                                 break;
 
                             case 'error':
@@ -480,6 +635,8 @@
                                 statusDiv.textContent = '';
                                 renderError(resultSection, eventData);
                                 if (cursorSpan.parentNode) cursorSpan.remove();
+                                turnCount += 1;
+                                updateSessionLabel();
                                 break;
                         }
                     }
@@ -514,6 +671,99 @@
             submitBtn.onclick = submitQuery;
             submitBtn.disabled = false;
             questionInput.focus();
+        }
+
+        function renderRouteBadge(card, data) {
+            if (!data) return;
+            const isAnalysis = data.path === 'analysis';
+            const badge = document.createElement('div');
+            badge.className = 'route-badge' + (isAnalysis ? ' analysis' : '');
+            if (isAnalysis) {
+                const sourceLabel = data.source === 'escalation'
+                    ? '（单轮无结果，已升级）'
+                    : '（多步分析）';
+                badge.textContent = `分析模式 ${sourceLabel}`;
+            } else {
+                badge.textContent = '快速查询';
+            }
+            badge.title = data.reason || '';
+            // 简单查询的徽标比较嘈杂，只在分析模式或升级时展示
+            if (isAnalysis || data.source === 'escalation') {
+                card.appendChild(badge);
+            }
+        }
+
+        function renderReport(container, data) {
+            const markdown = (data && data.markdown) || '';
+            const wrap = document.createElement('div');
+            wrap.className = 'report-block';
+            if (!markdown.trim()) {
+                wrap.textContent = '分析已完成，但没有生成可展示的报告。';
+                container.appendChild(wrap);
+                return;
+            }
+            for (const rawLine of markdown.split(/\r?\n/)) {
+                const line = rawLine.trim();
+                if (!line) continue;
+                let el = document.createElement('div');
+                if (line.startsWith('### ')) {
+                    el.className = 'rep-h3';
+                    el.textContent = line.slice(4);
+                } else if (line.startsWith('## ')) {
+                    el.className = 'rep-h2';
+                    el.textContent = line.slice(3);
+                } else if (line.startsWith('# ')) {
+                    el.className = 'rep-h1';
+                    el.textContent = line.slice(2);
+                } else if (/^[-*]\s+/.test(line)) {
+                    el.className = 'rep-li';
+                    el.textContent = '• ' + line.replace(/^[-*]\s+/, '');
+                } else {
+                    el.className = 'rep-p';
+                    el.textContent = line;
+                }
+                wrap.appendChild(el);
+            }
+
+            const steps = (data && data.steps) || [];
+            if (steps.length) {
+                const detail = document.createElement('details');
+                detail.style.marginTop = '12px';
+                const summary = document.createElement('summary');
+                summary.textContent = `查看 ${steps.length} 个执行步骤`;
+                summary.style.cssText = 'cursor:pointer;font-size:13px;color:#7a8fa6;';
+                detail.appendChild(summary);
+                const list = document.createElement('div');
+                list.style.cssText = 'margin-top:8px;font-size:13px;color:#666;line-height:1.7;';
+                for (const step of steps) {
+                    const row = document.createElement('div');
+                    const mark = step.success ? '✓' : '✗';
+                    row.textContent = `${mark} ${step.step_name || step.step_id} · ${step.row_count} 行`
+                        + (step.error ? ` · ${step.error}` : '');
+                    list.appendChild(row);
+                }
+                detail.appendChild(list);
+                wrap.appendChild(detail);
+            }
+
+            container.appendChild(wrap);
+        }
+
+        function renderContextHint(card, data) {
+            if (!data || !data.resolved_question) return;
+            const hint = document.createElement('div');
+            hint.className = 'context-hint';
+            const strategyLabels = {
+                rule_time: '继承时间维度',
+                rule_region: '继承区域维度',
+                rule_dimension: '继承分析维度',
+                llm_rewrite: '结合上下文改写',
+            };
+            const strategy = strategyLabels[data.strategy] || '结合上下文';
+            hint.innerHTML =
+                `<span class="label">${escapeHtml(strategy)} · 已理解为你问的是：</span>`
+                + `<span>${escapeHtml(data.resolved_question)}</span>`;
+            card.appendChild(hint);
         }
 
         function renderResult(container, data) {

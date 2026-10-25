@@ -28,8 +28,9 @@ from pydantic import BaseModel, Field
 
 from config import APP_CONFIG, is_prod
 from guardrails import AuditLogger, RateLimitError, RateLimiter
+from router import QueryRouter, RouteDecision
 from security import ROLE_POLICIES, SecurityError, UserContext, get_policy
-from text2SQL.chatbi_system import ChatBISystem
+from text2SQL.chatbi_system import ChatBISystem, _sse_event
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,6 +90,18 @@ rate_limiter = RateLimiter(
 )
 audit_logger = AuditLogger(_SECURITY_CFG.get("audit_log_path", "logs/audit.jsonl"))
 
+# ==================== 查询路由 ====================
+# 简单取数 → Text2SQL 单轮（1~3 次 LLM，1~3s）
+# 复杂归因 → Plan-and-Execute（6~12 次 LLM，15~40s）
+router = QueryRouter(llm_client=system.analyzer_llm)
+
+
+def analysis_runner(question: str, user: UserContext) -> dict[str, Any]:
+    """分析链路入口（独立成模块级函数，便于测试替换）。"""
+    from analysis_service import run_analysis
+
+    return run_analysis(question=question, user=user, system=system)
+
 
 # ==================== CORS ====================
 _origins = _SECURITY_CFG.get("cors_allow_origins") or ["*"]
@@ -123,6 +136,14 @@ class QueryRequest(BaseModel):
         max_length=64,
         description="会话标识；传入后启用多轮上下文（追问如“那上个月呢”会被改写为独立问题）",
     )
+    mode: str | None = Field(
+        default=None,
+        description=(
+            "查询模式：auto（默认，自动判断）/ simple（强制走 Text2SQL 单轮）/ "
+            "analysis（强制走多步分析）"
+        ),
+        pattern="^(auto|simple|analysis)$",
+    )
     use_few_shot: bool | None = Field(default=None, description="是否启用 Few-shot 示例")
     use_rules: bool | None = Field(default=None, description="是否启用业务规则约束")
     use_guards: bool | None = Field(default=None, description="是否启用错误防护")
@@ -138,12 +159,22 @@ class HealthResponse(BaseModel):
 
 
 class QuerySuccessResponse(BaseModel):
+    """统一响应。kind=table 时看 columns/rows；kind=report 时看 report/steps。"""
+
     success: bool = True
+    kind: str = Field(default="table", description="table（单轮取数）或 report（多步分析）")
+    route: dict[str, Any] | None = Field(
+        default=None, description="路由决策：path / confidence / reason / signals"
+    )
     question: str
-    sql: str
-    columns: list[str]
-    rows: list[dict[str, Any]]
-    formatted: str
+    sql: str = ""
+    columns: list[str] = Field(default_factory=list)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    formatted: str = ""
+    report: dict[str, Any] | None = Field(default=None, description="kind=report 时的结构化报告")
+    steps: list[dict[str, Any]] = Field(
+        default_factory=list, description="kind=report 时的各步骤执行摘要"
+    )
     metadata: dict[str, Any]
 
 
@@ -238,6 +269,8 @@ _STATUS_MAP = {
     "database_connection_error": 503,
     "database_query_timeout": 504,
     "database_pool_exhausted": 503,
+    "analysis_failed": 502,
+    "analysis_steps_failed": 502,
     "rate_limited": 429,
     "internal_server_error": 500,
 }
@@ -382,14 +415,31 @@ def delete_session(session_id: str, request: Request) -> dict[str, Any]:
     },
 )
 def query_chatbi(payload: QueryRequest, request: Request) -> QuerySuccessResponse:
-    """执行自然语言查询，返回标准化结果。"""
+    """执行自然语言查询：先路由，再分派到单轮链路或多步分析链路。"""
     started_at = perf_counter()
     user = _build_user_context(request)
     _check_quota(user)
     query_options = _resolve_query_options(payload)
 
-    logger.info("query user=%s role=%s q=%s", user.user_id, user.role, payload.question)
+    # 1) 路由决策
+    mode = payload.mode or APP_CONFIG.get("router", {}).get("default_mode", "auto")
+    decision = router.route(payload.question, mode=mode)  # type: ignore[arg-type]
+    logger.info(
+        "query user=%s role=%s route=%s conf=%.2f src=%s reason=%s q=%s",
+        user.user_id,
+        user.role,
+        decision.path,
+        decision.confidence,
+        decision.source,
+        decision.reason,
+        payload.question,
+    )
 
+    # 2) 直接走分析链路
+    if decision.path == "analysis":
+        return _respond_analysis(payload, user, decision, started_at)
+
+    # 3) 走单轮链路
     try:
         result = system.run(
             user_question=payload.question,
@@ -401,11 +451,24 @@ def query_chatbi(payload: QueryRequest, request: Request) -> QuerySuccessRespons
         duration_ms = round((perf_counter() - started_at) * 1000, 2)
         _audit(user, payload.question, {"error_type": exc.error_type}, duration_ms, "security_error")
         raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except Exception as exc:
+    except Exception:
         duration_ms = round((perf_counter() - started_at) * 1000, 2)
         logger.exception("查询链路异常")
         _audit(user, payload.question, {"error_type": "internal_server_error"}, duration_ms, "exception")
-        raise HTTPException(status_code=500, detail="服务内部异常，请稍后重试。") from exc
+        raise HTTPException(status_code=500, detail="服务内部异常，请稍后重试。")
+
+    # 4) 灰区问题：单轮失败或查不到数据 → 升级到分析链路再试一次
+    if router.should_escalate(decision, result):
+        logger.info("单轮结果不理想（success=%s），升级到分析链路", result.get("success"))
+        escalated = RouteDecision(
+            path="analysis",
+            confidence=0.6,
+            reason=f"单轮查询未得到有效结果，升级分析：{decision.reason}",
+            signals=list(decision.signals),
+            score=decision.score,
+            source="escalation",
+        )
+        return _respond_analysis(payload, user, escalated, started_at)
 
     duration_ms = round((perf_counter() - started_at) * 1000, 2)
 
@@ -419,6 +482,7 @@ def query_chatbi(payload: QueryRequest, request: Request) -> QuerySuccessRespons
                 "message": result.get("error", "查询失败"),
                 "error_type": error_type,
                 "analysis": result.get("analysis"),
+                "route": decision.as_dict(),
                 "hint": "若 SQL 语法/字段有误，系统已尝试自动修复；仍失败可换一种问法。",
             },
         )
@@ -435,6 +499,8 @@ def query_chatbi(payload: QueryRequest, request: Request) -> QuerySuccessRespons
     logger.info("query ok in %.2f ms (repair=%s)", duration_ms, result.get("repair_attempts"))
 
     return QuerySuccessResponse(
+        kind="table",
+        route=decision.as_dict(),
         question=payload.question,
         sql=result["sql"],
         columns=result["columns"],
@@ -444,11 +510,64 @@ def query_chatbi(payload: QueryRequest, request: Request) -> QuerySuccessRespons
     )
 
 
+def _respond_analysis(
+    payload: QueryRequest,
+    user: UserContext,
+    decision: RouteDecision,
+    started_at: float,
+) -> QuerySuccessResponse:
+    """执行分析链路并归一化为 API 响应。"""
+    result = analysis_runner(payload.question, user)
+    duration_ms = round((perf_counter() - started_at) * 1000, 2)
+
+    if not result.get("success"):
+        error_type = result.get("error_type", "analysis_failed")
+        _audit(user, payload.question, result, duration_ms, "analysis_failed")
+        raise HTTPException(
+            status_code=_STATUS_MAP.get(error_type, 500),
+            detail={
+                "message": result.get("error", "分析失败"),
+                "error_type": error_type,
+                "route": decision.as_dict(),
+                "steps": result.get("steps") or [],
+                "hint": "多步分析依赖多次模型调用，失败时可重试，或改用更具体的取数问题。",
+            },
+        )
+
+    _audit(user, payload.question, result, duration_ms, "analysis_ok")
+    logger.info(
+        "analysis ok in %.2f ms (steps=%s/%s)",
+        duration_ms,
+        (result.get("metadata") or {}).get("step_succeeded"),
+        (result.get("metadata") or {}).get("step_total"),
+    )
+
+    metadata = {
+        **(result.get("metadata") or {}),
+        "duration_ms": duration_ms,
+        "role": user.role,
+    }
+    return QuerySuccessResponse(
+        kind="report",
+        route=decision.as_dict(),
+        question=payload.question,
+        sql=result.get("sql", ""),
+        columns=result.get("columns") or [],
+        rows=[],
+        formatted=result.get("formatted", ""),
+        report=result.get("report"),
+        steps=result.get("steps") or [],
+        metadata=metadata,
+    )
+
+
 @app.post("/api/v1/query/stream", tags=["查询"], summary="SSE 流式查询（逐步推送）")
 async def query_chatbi_stream(payload: QueryRequest, request: Request) -> StreamingResponse:
     """以 SSE 流式返回结果。
 
-    事件类型：sql_chunk / sql_done / repair / result / error
+    - `route`：先推送路由决策（path/confidence/reason）
+    - 简单查询：`sql_chunk` / `sql_done` / `repair` / `result` / `error`
+    - 复杂分析：`status`（进度提示）→ `report`（Markdown 报告）
     """
     user = _build_user_context(request)
     _check_quota(user)
@@ -460,6 +579,40 @@ async def query_chatbi_stream(payload: QueryRequest, request: Request) -> Stream
         last_error_type: str | None = None
         sql_seen: str | None = None
         try:
+            # 路由必须放在生成器里：它是同步阻塞调用（可能触发 LLM），
+            # 在 async 函数体里直接调用会阻塞事件循环。
+            mode = payload.mode or APP_CONFIG.get("router", {}).get("default_mode", "auto")
+            decision = router.route(payload.question, mode=mode)  # type: ignore[arg-type]
+            yield _sse_event("route", decision.as_dict())
+
+            if decision.path == "analysis":
+                yield _sse_event(
+                    "status",
+                    {"message": "这是个分析类问题，正在拆解并分步查询，预计 15~40 秒..."},
+                )
+                result = analysis_runner(payload.question, user)
+                if result.get("success"):
+                    yield _sse_event(
+                        "report",
+                        {
+                            "markdown": result.get("formatted", ""),
+                            "report": result.get("report"),
+                            "steps": result.get("steps") or [],
+                            "duration_ms": (result.get("metadata") or {}).get("duration_ms"),
+                        },
+                    )
+                else:
+                    last_error_type = result.get("error_type") or "analysis_failed"
+                    yield _sse_event(
+                        "error",
+                        {
+                            "error": result.get("error", "分析失败"),
+                            "error_type": last_error_type,
+                            "steps": result.get("steps") or [],
+                        },
+                    )
+                return
+
             for event_str in system.run_stream(
                 user_question=payload.question,
                 user=user,

@@ -97,6 +97,17 @@ APP_CONFIG = {
         "max_attempts": _env_int("REPAIR_MAX_ATTEMPTS", "2"),
         "enabled": _env_bool("REPAIR_ENABLED", "true"),
     },
+    "router": {
+        # 查询路由开关（关闭则所有问题都走 Text2SQL 单轮链路）
+        "enabled": _env_bool("ROUTER_ENABLED", "true"),
+        # auto | simple | analysis —— 客户端未显式指定 mode 时的默认值
+        "default_mode": os.getenv("ROUTER_DEFAULT_MODE", "auto"),
+        # 灰区是否请 LLM 判断（关闭则只用规则，零额外成本）
+        "llm_classify": _env_bool("ROUTER_LLM_CLASSIFY", "true"),
+        # 分析链路预算：子任务上限与建议超时（超时用于提示，不做强制中断）
+        "analysis_max_steps": _env_int("ANALYSIS_MAX_STEPS", "5"),
+        "analysis_timeout_seconds": _env_int("ANALYSIS_TIMEOUT_SECONDS", "120"),
+    },
     "conversation": {
         # 多轮对话开关（关闭后每个请求都是独立单轮）
         "enabled": _env_bool("MULTITURN_ENABLED", "true"),
