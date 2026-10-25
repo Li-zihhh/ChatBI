@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, Field
 
-from config import LLM_CONFIG
+from config import APP_CONFIG, LLM_CONFIG
 from text2SQL.llm_client import LLMClient
 
 
@@ -118,16 +118,32 @@ class ReportGenerator:
 
     @staticmethod
     def _compress_step_result(step_result: dict[str, Any]) -> dict[str, Any]:
-        """压缩步骤执行结果，保留必要字段。"""
+        """压缩步骤执行结果，保留必要字段。
+
+        `formatted` 是完整结果集渲染出来的表格，可能有几千行；
+        原样塞进 Prompt 会：
+          1. 超出模型上下文长度，导致报告生成直接失败；
+          2. 把整张业务数据表发给第三方模型（合规风险）。
+        因此按字符数截断，并只保留少量数据行作为示例。
+        """
+        cfg = APP_CONFIG.get("analysis", {})
+        max_chars = int(cfg.get("report_max_chars", 1200))
+        preview_n = int(cfg.get("report_rows_preview", 3))
+
         rows = step_result.get("rows") or []
+        formatted = str(step_result.get("formatted") or "")
+        truncated = len(formatted) > max_chars
+
         return {
             "step_id": step_result.get("step_id"),
             "step_name": step_result.get("step_name"),
             "status": step_result.get("status"),
             "success": step_result.get("success"),
-            "formatted": step_result.get("formatted"),
+            "formatted": formatted[:max_chars],
+            "formatted_truncated": truncated,
+            "row_count": len(rows),
+            "rows_preview": rows[:preview_n] if preview_n > 0 else [],
             "result_reference": step_result.get("result_reference"),
-            "rows_preview": rows[:3],
             "error": step_result.get("error"),
         }
 

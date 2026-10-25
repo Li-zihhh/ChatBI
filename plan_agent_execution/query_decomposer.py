@@ -5,14 +5,19 @@ Query 拆解器模块
 """
 
 import json
+import logging
+from functools import lru_cache
 from pathlib import Path
 import re
 from typing import Callable
 
 from pydantic import BaseModel, Field, ValidationError
 
+from config import LLM_CONFIG
 from text2SQL.llm_client import LLMClient
 from text2SQL.prompt_builder import SCHEMA
+
+logger = logging.getLogger("chatbi.decomposer")
 
 
 class DecomposedTask(BaseModel):
@@ -54,8 +59,13 @@ AVAILABLE_DIMENSIONS = [
 ]
 
 
-def _load_indicator_catalog() -> list[str]:
-    """加载指标目录，返回所有指标名称（包含别名）。"""
+@lru_cache(maxsize=1)
+def _load_indicator_catalog() -> tuple[str, ...]:
+    """加载指标目录，返回所有指标名称（包含别名）。
+
+    指标库是静态文件，缓存一进程只读一次——`build_decomposition_prompt`
+    每次拆解（含重试）都会调用它。
+    """
     config_path = Path(__file__).resolve().parent.parent / "indicator_rag" / "indicators_full.json"
     with config_path.open("r", encoding="utf-8") as file:
         data = json.load(file)
@@ -64,7 +74,7 @@ def _load_indicator_catalog() -> list[str]:
     for indicator in data.get("indicators", []):
         names.append(indicator["name"])
         names.extend(indicator.get("aliases", []))
-    return names
+    return tuple(names)
 
 
 def _max_tasks_for_question_type(question_type: str) -> int:
@@ -77,6 +87,31 @@ def _max_tasks_for_question_type(question_type: str) -> int:
     if "dimension" in normalized or "维度" in question_type:
         return 5
     return 8
+
+
+# 无法落到一条 SELECT 上的任务类型 / 描述特征。
+# 拆解器偶尔会生成"确定时间范围""准备基础数据"这类前置步骤——
+# 执行时必然 0 行，却会作为一条"失败/空结果"进入最终报告。
+_NON_QUERY_TASK_TYPES = {
+    "data_preparation",
+    "preparation",
+    "setup",
+    "data_loading",
+    "data_cleaning",
+}
+
+_NON_QUERY_PATTERNS = re.compile(
+    r"确定.{0,6}时间范围"
+    r"|准备数据|读取数据|加载数据|获取基础数据|初始化|清洗数据|确认数据可用"
+)
+
+
+def _is_non_query_task(task: "DecomposedTask") -> bool:
+    """判断子任务是否无法用一条 SQL 完成。"""
+    if (task.task_type or "").strip().lower() in _NON_QUERY_TASK_TYPES:
+        return True
+    haystack = f"{task.task_name} {task.description}"
+    return bool(_NON_QUERY_PATTERNS.search(haystack))
 
 
 def build_decomposition_prompt(user_question: str) -> tuple[str, str]:
@@ -119,6 +154,11 @@ def build_decomposition_prompt(user_question: str) -> tuple[str, str]:
 7. 维度只能从【可用分析维度】中选择；如用户问题提到未建模维度，应回退到最接近的已建模维度
 8. 指标优先复用【可用指标】中的名称或别名
 9. 如果一个任务同时要求多个维度或多个驱动因素，请拆成多个更简单的子任务
+10. **每个子任务都必须能落到一条 SELECT 查询上**。
+    严禁生成"确定时间范围""准备数据""读取数据""初始化"这类无法直接查询的步骤——
+    时间范围应写进对应查询的 WHERE 条件里；
+    若某步只是"计算环比/增长率/占比"，请说明它基于哪一步的结果、需要哪些列，
+    使执行者能用一条 SQL 完成。
 
 【常见分析类型拆解策略】
 1. 趋势分析：优先拆成“主指标趋势 + 关键驱动项趋势 + 异常月份定位 + 原因归纳”，通常不超过 6 个子任务
@@ -129,14 +169,26 @@ def build_decomposition_prompt(user_question: str) -> tuple[str, str]:
 
 
 class QueryDecomposer:
-    """复杂问题拆解器。"""
+    """复杂问题拆解器。
+
+    timeout 单独设置（默认 90s），因为拆解任务需生成嵌套 JSON，
+    比普通 SQL 生成慢得多，用全局 30s 超时容易误伤。
+    """
 
     def __init__(
         self,
         llm_client: LLMClient | None = None,
         response_generator: Callable[[str, str], str] | None = None,
+        timeout: float = 90.0,
     ):
-        self.llm = llm_client or LLMClient()
+        if llm_client is not None:
+            # 注入的 client 的超时由调用方负责：它可能是共享实例（如 analyzer_llm），
+            # 在这里改写 `client.timeout` 会悄悄影响其它调用方，属于隐蔽的副作用。
+            self.llm = llm_client
+        else:
+            # 自己构造时用独立的、更宽松的超时：拆解要生成嵌套 JSON，比生成 SQL 慢
+            self.llm = LLMClient(config={**LLM_CONFIG, "timeout": timeout})
+        self.timeout = timeout
         self.response_generator = response_generator or self._generate_response
 
     def decompose(self, user_question: str) -> dict:
@@ -154,6 +206,7 @@ class QueryDecomposer:
             raw_response = self.response_generator(system_msg, prompt) # 生成 LLM 原始输出
             print(f"LLM 原始输出: \n{raw_response}")
             plan = self._parse_plan(raw_response) # 解析 LLM 返回结果，兼容 Markdown 代码块
+            plan = self._normalize_plan(plan) # 丢弃无法落到 SQL 的子任务 + 清理悬空依赖
             print(f"解析后的子任务: \n{plan}")
 
             try:
@@ -171,20 +224,10 @@ class QueryDecomposer:
         raise last_error
 
     def _generate_response(self, system_msg: str, prompt: str) -> str:
-        """默认通过 LLM 生成 JSON 结果。"""
-        response = self.llm.client.chat.completions.create(
-            model=self.llm.model,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0,
-            response_format={"type": "json_object"},
-        )
-        content = response.choices[0].message.content
-        if not content:
-            raise ValueError("LLM 没有返回可用的拆解结果")
-        return content
+        """默认通过 LLM 生成 JSON 结果。
+        走 LLMClient.generate_text()，统一享受超时 + 指数退避重试。
+        """
+        return self.llm.generate_text(system_msg=system_msg, prompt=prompt)
 
     def _parse_plan(self, raw_response: str) -> DecompositionPlan:
         """解析 LLM 返回结果，兼容 Markdown 代码块。"""
@@ -218,12 +261,30 @@ class QueryDecomposer:
                     raise ValueError(f"任务 {task.task_id} 依赖了不存在的任务: {dep_id}")
             seen_ids.add(task.task_id)
 
-    def _normalize_plan(
-        self,
-        user_question: str,
-        plan: DecompositionPlan,
-    ) -> DecompositionPlan:
-        """归一化拆解结果，确保任务依赖顺序。"""
+    @staticmethod
+    def _normalize_plan(plan: DecompositionPlan) -> DecompositionPlan:
+        """丢弃无法落到 SQL 上的子任务，并清理因此产生的悬空依赖。
+
+        这里选择"丢弃"而不是"报错重试"，理由是：
+          - 这类任务通常是模型多此一举的前置步骤，丢掉不影响后续任务
+            （依赖它的任务只是少了一个空输入）；
+          - 若为此让整条链路重试 2 次再失败，代价远高于收益。
+        """
+        kept = [task for task in plan.subtasks if not _is_non_query_task(task)]
+        if not kept or len(kept) == len(plan.subtasks):
+            return plan
+
+        kept_ids = {task.task_id for task in kept}
+        dropped_ids = [
+            task.task_id for task in plan.subtasks if task.task_id not in kept_ids
+        ]
+        for task in kept:
+            task.depends_on = [dep for dep in task.depends_on if dep in kept_ids]
+
+        logger.warning(
+            "已丢弃 %d 个无法落到 SQL 的子任务：%s", len(dropped_ids), dropped_ids
+        )
+        plan.subtasks = kept
         return plan
 
     @staticmethod

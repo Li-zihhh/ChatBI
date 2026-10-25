@@ -114,7 +114,8 @@ class ConversationStore(ABC):
     def append_turn(self, session: Session, turn: Turn) -> Session: ...
 
     @abstractmethod
-    def reset(self, session_id: str) -> bool: ...
+    def reset(self, session_id: str, user_id: str | None = None) -> bool:
+        """清除会话。传入 user_id 时只允许清除自己的会话。"""
 
     @abstractmethod
     def purge_expired(self) -> int: ...
@@ -186,9 +187,26 @@ class InMemoryConversationStore(ConversationStore):
             self._sessions[session.session_id] = session
             return session
 
-    def reset(self, session_id: str) -> bool:
+    def reset(self, session_id: str, user_id: str | None = None) -> bool:
+        """清除会话；传入 user_id 时校验归属，避免删掉别人的上下文。
+
+        早期实现不校验归属，任何人只要知道 session_id 就能清掉他人的会话
+        （会话 ID 是 UUID，猜中的概率低，但这仍是一个不该存在的越权口子）。
+        """
         with self._lock:
-            return self._sessions.pop(session_id, None) is not None
+            session = self._sessions.get(session_id)
+            if session is None:
+                return False
+            if user_id is not None and session.user_id != user_id:
+                logger.warning(
+                    "拒绝清除他人会话：session=%s 归属=%s 请求者=%s",
+                    session_id,
+                    session.user_id,
+                    user_id,
+                )
+                return False
+            self._sessions.pop(session_id, None)
+            return True
 
     def purge_expired(self) -> int:
         now = time()

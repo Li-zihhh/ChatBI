@@ -58,6 +58,19 @@ def _is_retryable(exc: Exception) -> bool:
     }
 
 
+def _is_timeout(exc: Exception) -> bool:
+    """判断是否为超时类失败。
+
+    超时要和"连接被拒/5xx/限流"区分开：后者重试常常立刻成功，
+    而超时意味着服务端就是慢，同一个 prompt 再跑一遍大概率还是超时——
+    所以按 max_retries 重试 3 次纯属把 30 秒浪费成 90 秒。
+    """
+    if type(exc).__name__ in {"APITimeoutError", "TimeoutException", "ReadTimeout"}:
+        return True
+    message = str(exc).lower()
+    return "timeout" in message or "timed out" in message
+
+
 class LLMClient:
     """LLM API 客户端。"""
 
@@ -68,9 +81,13 @@ class LLMClient:
         self.embedding_model = self._config.get("embedding_model", "text-embedding-v3")
         self.temperature = self._config.get("temperature", 0.2)
         self.max_tokens = self._config.get("max_tokens", 4000)
-        self.timeout = float(self._config.get("timeout", 30))
+        self.timeout = float(self._config.get("timeout", 60))
         self.max_retries = int(self._config.get("max_retries", 2))
         self.retry_backoff = float(self._config.get("retry_backoff", 0.5))
+        self.timeout_retries = int(self._config.get("timeout_retries", 1))
+        self.enable_thinking = str(self._config.get("enable_thinking", "false")).lower()
+        # 供应商不支持 enable_thinking 时，失败一次后自动降级为不传
+        self._thinking_supported = self.enable_thinking in {"true", "false"}
 
     @property
     def client(self) -> OpenAI:
@@ -84,6 +101,28 @@ class LLMClient:
             )
         return self._client
 
+    def _build_kwargs(self, **kwargs) -> dict:
+        """组装请求参数，并在配置要求时关闭思考模式。"""
+        if self._thinking_supported:
+            kwargs["extra_body"] = {"enable_thinking": self.enable_thinking == "true"}
+        return kwargs
+
+    def _should_retry(self, exc: Exception, attempt: int, timeouts: int) -> bool:
+        """超时按 timeout_retries 限次，其它可重试错误按 max_retries。
+
+        timeouts 在调用前已自增，因此 timeout_retries=1 表示"最多再试 1 次超时"。
+        """
+        if _is_timeout(exc):
+            return timeouts <= self.timeout_retries
+        return attempt < self.max_retries and _is_retryable(exc)
+
+    @staticmethod
+    def _looks_like_unsupported_param(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "enable_thinking" in message or (
+            "invalid_request" in message and "parameter" in message
+        )
+
     # ---------- 生成 ----------
     def generate_sql(self, system_msg: str, prompt: str) -> str:
         """生成 SQL（同步，一次性返回）。"""
@@ -92,62 +131,89 @@ class LLMClient:
     def generate_text(self, system_msg: str, prompt: str) -> str:
         """生成普通文本，带超时与指数退避重试。"""
         last_exc: Exception | None = None
-        for attempt in range(self.max_retries + 1):
+        attempt = 0
+        timeouts = 0
+
+        while True:
             try:
                 response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                    timeout=self.timeout,
+                    **self._build_kwargs(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": system_msg},
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens,
+                        timeout=self.timeout,
+                    )
                 )
                 content = response.choices[0].message.content or ""
                 return content.strip()
             except Exception as exc:
                 last_exc = exc
-                if attempt >= self.max_retries or not _is_retryable(exc):
+
+                # 供应商不认识 enable_thinking：降级后立刻重试一次
+                if self._thinking_supported and self._looks_like_unsupported_param(exc):
+                    logger.warning(
+                        "当前端点不接受 enable_thinking 参数，已降级为不传：%s", exc
+                    )
+                    self._thinking_supported = False
+                    continue
+
+                if _is_timeout(exc):
+                    timeouts += 1
+
+                if not self._should_retry(exc, attempt, timeouts):
                     raise
-                delay = self.retry_backoff * (2**attempt)
+
+                attempt += 1
+                delay = self.retry_backoff * (2 ** (attempt - 1))
                 logger.warning(
-                    "LLM 调用失败（第 %d/%d 次），%.1fs 后重试：%s",
-                    attempt + 1,
-                    self.max_retries + 1,
+                    "LLM 调用失败（第 %d 次尝试，%s），%.1fs 后重试：%s",
+                    attempt,
+                    "超时" if _is_timeout(exc) else "可重试错误",
                     delay,
                     exc,
                 )
                 time.sleep(delay)
 
-        raise last_exc  # pragma: no cover - 循环必然在此前 return 或 raise
-
     def generate_sql_stream(self, system_msg: str, prompt: str) -> Generator[str, None, None]:
         """流式生成 SQL（逐 chunk 产出）。
 
-        流式请求不做自动重试：一旦已向客户端推送过内容，重试会造成重复输出。
-        首次建立连接前失败时才重试一次（由 SDK 层之外的本方法处理成本较高，
-        因此这里只在建立 stream 失败时重试，产出阶段失败直接抛出）。
+        流式请求只在"建立连接"阶段重试：一旦已向客户端推送过内容，
+        重试会造成重复输出。此外流式的读超时是逐 chunk 计的，
+        对长生成比一次性返回更耐受。
         """
         stream = None
-        for attempt in range(self.max_retries + 1):
+        attempt = 0
+        timeouts = 0
+        while True:
             try:
                 stream = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                    stream=True,
-                    timeout=self.timeout,
+                    **self._build_kwargs(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": system_msg},
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens,
+                        stream=True,
+                        timeout=self.timeout,
+                    )
                 )
                 break
             except Exception as exc:
-                if attempt >= self.max_retries or not _is_retryable(exc):
+                if self._thinking_supported and self._looks_like_unsupported_param(exc):
+                    self._thinking_supported = False
+                    continue
+                if _is_timeout(exc):
+                    timeouts += 1
+                if not self._should_retry(exc, attempt, timeouts):
                     raise
-                delay = self.retry_backoff * (2**attempt)
+                attempt += 1
+                delay = self.retry_backoff * (2 ** (attempt - 1))
                 logger.warning("流式请求建立失败，%.1fs 后重试：%s", delay, exc)
                 time.sleep(delay)
 

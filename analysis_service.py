@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import logging
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import Any
 
 from config import APP_CONFIG
@@ -64,16 +64,24 @@ def run_analysis(
 
     cfg = APP_CONFIG.get("router", {})
     budget = int(max_steps or cfg.get("analysis_max_steps", 5))
+    budget_seconds = float(cfg.get("analysis_timeout_seconds", 120) or 0)
     started = perf_counter()
+    # 总时间预算：超出后剩余步骤直接跳过，避免"前几步超时、后面继续烧钱"
+    deadline = monotonic() + budget_seconds if budget_seconds > 0 else None
 
     shared_system = system or ChatBISystem()
 
     # 关键：把 user 注入每个子步骤的调用参数，保证行级权限与脱敏逐步骤生效
     run_options: dict[str, Any] = {
         "user": user,
-        "use_schema_linking": True,
+        # 子步骤默认不走 Schema Linking / 指标 RAG：
+        #   1) 子问题由拆解器生成、表范围已知，手写全量 Schema 足够且更稳
+        #   2) 每步可省掉 1~2 次 Embedding 往返
+        #   3) 更重要的是避开 Schema Linking 的"LLM 慢速通道"——那是一次超大 prompt 调用，
+        #      5 步就是 5 次额外请求，曾把单步耗时推到 50 秒以上
+        "use_schema_linking": bool(cfg.get("analysis_use_schema_linking", False)),
+        "use_indicator_rag": bool(cfg.get("analysis_use_indicator_rag", False)),
         "use_indicator_knowledge": True,
-        "use_indicator_rag": True,
         # 子问题是机器生成的，不应写进用户的多轮历史
         "enable_multiturn": False,
     }
@@ -87,7 +95,9 @@ def run_analysis(
                 failure_policy="skip",
             )
             agent = PlanAndExecuteAgent(executor=executor)
-        raw = agent.run(question, max_steps=budget)
+            raw = agent.run(question, max_steps=budget, deadline=deadline)
+        else:
+            raw = agent.run(question, max_steps=budget)
     except Exception as exc:
         logger.exception("分析链路执行失败")
         return {

@@ -1,4 +1,4 @@
-﻿"""
+"""
 StepExecutor 模块
 
 Plan-and-Execute Agent 的核心执行引擎。
@@ -9,8 +9,10 @@ Plan-and-Execute Agent 的核心执行引擎。
 from __future__ import annotations
 
 import json
+from time import monotonic
 from typing import Any, Callable, Literal
 
+from config import APP_CONFIG
 from text2SQL.chatbi_system import ChatBISystem
 from .middle_state import (
     ExecutionPlan,
@@ -61,8 +63,15 @@ class StepExecutor:
         self,
         plan: ExecutionPlan,
         max_steps: int | None = None,
+        deadline: float | None = None,
     ) -> list[StepExecutionResult]:
-        """遍历 plan.steps，按依赖顺序逐一执行：检查失败策略 → 检查依赖是否满足 → 注入前置上下文 → 调用 ChatBISystem.run() → 存储中间结果。"""
+        """遍历 plan.steps，按依赖顺序逐一执行：检查失败策略 → 检查依赖是否满足 → 注入前置上下文 → 调用 ChatBISystem.run() → 存储中间结果。
+
+        Args:
+            deadline: 单调时钟的绝对截止时间（time.monotonic() 口径）。
+                一旦超过，剩余步骤直接标记为 skipped，不再发起新的
+                LLM/DB 调用——避免"前几步超时、后几步还继续烧钱"。
+        """
         results: list[StepExecutionResult] = []  # 存储所有步骤的执行结果
         results_by_step: dict[str, StepExecutionResult] = {}     # 存储每个步骤的执行结果
         steps_to_run = plan.steps[:max_steps] if max_steps is not None else plan.steps
@@ -72,6 +81,18 @@ class StepExecutor:
         print_progress(f"开始执行计划，共 {total_steps} 个步骤。")
 
         for index, step in enumerate(steps_to_run, start=1):
+            if deadline is not None and monotonic() > deadline:
+                print_progress(
+                    f"{step.step_id} 已跳过：分析时间预算已耗尽。"
+                )
+                skipped = self._build_skipped_result(
+                    step=step,
+                    error="分析时间预算已耗尽，剩余步骤未执行。",
+                )
+                results.append(skipped)
+                results_by_step[step.step_id] = skipped
+                continue
+
             if abort_triggered:
                 print_progress(
                     f"{step.step_id} 已跳过：前序步骤失败，当前执行策略为 abort。"
@@ -204,19 +225,31 @@ class StepExecutor:
         dependency_ids: list[str],
         results_by_step: dict[str, StepExecutionResult],
     ) -> str:
-        """从已完成步骤中提取结果，序列化为 JSON 字符串，作为后续步骤的上下文。"""
+        """从已完成步骤中提取结果，序列化为 JSON 字符串，作为后续步骤的上下文。
+
+        **必须截断**：早期实现把上游步骤的**完整结果集**写进下一步的问题里，
+        一个 5000 行的结果会生成几十万字符的 Prompt——
+        既必然超过模型上下文长度（整条链路直接失败），
+        也把整张业务数据表送给了第三方 API。
+        这里只带前 N 行，并显式告知模型"共有多少行、已截断"。
+        """
         if not dependency_ids:
             return ""
 
+        max_rows = int(APP_CONFIG.get("analysis", {}).get("context_max_rows", 20))
         lines: list[str] = []
         for step_id in dependency_ids:
             result = results_by_step[step_id]
             rows = result.rows or self.get_intermediate_result(result.result_reference)
+            total = len(rows)
+            sample = rows[:max_rows] if max_rows > 0 else []
             payload = {
                 "step_id": result.step_id,
                 "step_name": result.step_name,
                 "columns": result.columns,
-                "rows": rows,
+                "row_count": total,
+                "rows": sample,
+                "rows_truncated": total > len(sample),
                 "result_reference": result.result_reference,
             }
             lines.append(json.dumps(payload, ensure_ascii=False, default=str))

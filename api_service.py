@@ -276,9 +276,22 @@ _STATUS_MAP = {
 }
 
 
-def _check_quota(user: UserContext) -> None:
+def _quota_cost(decision: RouteDecision) -> int:
+    """按链路折算配额消耗：分析链路一次抵多次普通查询。"""
+    if decision.path == "analysis":
+        return int(APP_CONFIG.get("analysis", {}).get("quota_cost", 5))
+    return 1
+
+
+def _check_quota(user: UserContext, cost: int = 1) -> None:
+    """扣减配额。cost 允许一次请求折算多次，用于覆盖分析类请求的真实成本。
+
+    分析链路一次要 6~12 次 LLM 调用，若与普通查询一样只扣 1 次，
+    日配额 2000 就等于放出去两万多次模型调用，限流形同虚设。
+    """
     try:
-        rate_limiter.check(user.user_id)
+        for _ in range(max(1, cost)):
+            rate_limiter.check(user.user_id)
     except RateLimitError as exc:
         audit_logger.log(
             user_id=user.user_id, role=user.role, outcome="rate_limited", reason=str(exc)
@@ -391,7 +404,14 @@ def delete_session(session_id: str, request: Request) -> dict[str, Any]:
     即便这里不校验，跨用户清除也只会清掉一个空会话。
     """
     user = _build_user_context(request)
-    removed = system.conversation_store.reset(session_id)
+    removed = system.conversation_store.reset(session_id, user_id=user.user_id)
+    if not removed:
+        # 不区分"不存在"与"非本人"，避免被用来探测他人会话是否存在
+        logger.info(
+            "会话清除未生效（不存在或非本人）：session=%s user=%s",
+            session_id,
+            user.user_id,
+        )
     audit_logger.log(
         user_id=user.user_id, role=user.role, outcome="session_reset", session_id=session_id
     )
@@ -418,7 +438,6 @@ def query_chatbi(payload: QueryRequest, request: Request) -> QuerySuccessRespons
     """执行自然语言查询：先路由，再分派到单轮链路或多步分析链路。"""
     started_at = perf_counter()
     user = _build_user_context(request)
-    _check_quota(user)
     query_options = _resolve_query_options(payload)
 
     # 1) 路由决策
@@ -435,7 +454,10 @@ def query_chatbi(payload: QueryRequest, request: Request) -> QuerySuccessRespons
         payload.question,
     )
 
-    # 2) 直接走分析链路
+    # 2) 按真实成本扣配额（分析链路一次要 6~12 次模型调用）
+    _check_quota(user, cost=_quota_cost(decision))
+
+    # 3) 直接走分析链路
     if decision.path == "analysis":
         return _respond_analysis(payload, user, decision, started_at)
 
@@ -468,6 +490,8 @@ def query_chatbi(payload: QueryRequest, request: Request) -> QuerySuccessRespons
             score=decision.score,
             source="escalation",
         )
+        # 升级意味着真实成本变高：补扣差额（原本已按普通查询扣过 1 次）
+        _check_quota(user, cost=max(0, _quota_cost(escalated) - 1))
         return _respond_analysis(payload, user, escalated, started_at)
 
     duration_ms = round((perf_counter() - started_at) * 1000, 2)
@@ -570,6 +594,8 @@ async def query_chatbi_stream(payload: QueryRequest, request: Request) -> Stream
     - 复杂分析：`status`（进度提示）→ `report`（Markdown 报告）
     """
     user = _build_user_context(request)
+    # 先按 1 次扣一次（保证即使路由阶段就失败也有记账），
+    # 若路由判定为分析链路，再在生成器里补扣差额。
     _check_quota(user)
     query_options = _resolve_query_options(payload)
     logger.info("stream user=%s role=%s q=%s", user.user_id, user.role, payload.question)
@@ -586,6 +612,16 @@ async def query_chatbi_stream(payload: QueryRequest, request: Request) -> Stream
             yield _sse_event("route", decision.as_dict())
 
             if decision.path == "analysis":
+                # 响应头已经发出，配额不足只能以 SSE error 事件表达
+                try:
+                    _check_quota(user, cost=max(0, _quota_cost(decision) - 1))
+                except HTTPException as exc:
+                    last_error_type = "rate_limited"
+                    yield _sse_event(
+                        "error",
+                        {"error": str(exc.detail), "error_type": "rate_limited"},
+                    )
+                    return
                 yield _sse_event(
                     "status",
                     {"message": "这是个分析类问题，正在拆解并分步查询，预计 15~40 秒..."},
@@ -654,7 +690,7 @@ async def query_chatbi_stream(payload: QueryRequest, request: Request) -> Stream
 # ==================== 静态文件 ====================
 STATIC_DIR = Path(__file__).parent / "static"
 if STATIC_DIR.is_dir():
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
 
 
 if __name__ == "__main__":
