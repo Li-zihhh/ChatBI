@@ -101,6 +101,56 @@ def _ensure_fact_table_for_metric(
     return tables
 
 
+def _ensure_tables_for_rules(
+    query: str,
+    tables: list[dict],
+    pool: list[dict] | None = None,
+) -> list[dict]:
+    """用业务规则反推"必需表"，把漏掉的表补进候选集。
+
+    背景：`BUSINESS_RULES` 里 `force_include` 存的是字段键（如
+    `dim_products.material_cost`），但字段匹配有三道表约束（向量检索的
+    `$in candidate_tables` 过滤、补充强制字段时的 `meta["table"] in candidate_tables`、
+    组装 Schema 时的 `f["table"] in table_fields_map`）。
+    因此只要 `dim_products` 没被召回，规则层"命中"了它的字段也进不了 Prompt。
+
+    这里用字段键的表前缀反推必需表，做一次确定性补齐：
+      - 表信息优先从本次召回的宽池里取（保留分数）
+      - 宽池里没有时，用 TABLE_METADATA 构造最小条目兜底，
+        保证"规则说了需要"就一定能补上
+    """
+    required = {
+        key.split(".", 1)[0] for key in evaluate_rules(query)["force_include"] if "." in key
+    }
+    if not required:
+        return tables
+
+    existing = {t["table_name"] for t in tables}
+    missing = required - existing
+    if not missing:
+        return tables
+
+    pool_by_name = {t["table_name"]: t for t in (pool or [])}
+    for name in sorted(missing):
+        table = pool_by_name.get(name)
+        if table is None:
+            meta = TABLE_METADATA.get(name)
+            if meta is None:  # 规则里出现未知表：跳过而不是塞脏数据
+                logger.warning("规则要求的表不在已知表集合内，已跳过：%s", name)
+                continue
+            table = {
+                "table_name": name,
+                "score": 0.0,
+                "description": meta["description"],
+                "domain": meta["domain"],
+                "key_fields": meta["key_fields"],
+            }
+        tables = tables + [table]
+        logger.info("规则要求，补充召回表：%s", name)
+
+    return tables
+
+
 # ==================== 置信度评估（双通道核心） ====================
 CONFIDENCE_THRESHOLD = 0.7
 
